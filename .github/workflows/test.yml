@@ -17,7 +17,7 @@ jobs:
         uses: actions/setup-python@v1
         with:
           python-version: ${{ matrix.python_version }}
-      - name: Fetch rqdb
+      - name: Fetch httppubsubserver
         uses: actions/checkout@v2
       - name: Generic python setup
         run: |
@@ -25,9 +25,9 @@ jobs:
       - name: Installing dependencies
         run: |
           python -m pip install -r requirements.txt
-      - name: Lint rqdb with black
+      - name: Lint httppubsubserver with black
         run: |
-          python -m black --check src/rqdb
+          python -m black --check src/httppubsubserver
       - name: Lint tests with black
         run: |
           python -m black --check tests
