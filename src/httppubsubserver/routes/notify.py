@@ -144,7 +144,7 @@ async def notify(
                         data=request_body,
                         headers={
                             **(
-                                {"Authorization": authorization}
+                                {"Authorization": my_authorization}
                                 if authorization is not None
                                 else {}
                             ),
