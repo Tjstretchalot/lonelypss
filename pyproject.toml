@@ -1,6 +1,6 @@
 [project]
-name = httppubsubserver
-version = 0.0.1
+name = "httppubsubserver"
+version = "0.0.1"
 description = "PubSub over HTTP"
 authors = [
     { name = "Timothy Moore", email = "mtimothy984@gmail.com" }

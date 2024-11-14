@@ -1,5 +1,13 @@
 # httppubsub
 
+## PROJECT STAGE - PLANNING
+
+This project is in the development stage 1 - planning. This means that most things
+you see won't work yet and are in the process of being finalized. Star/watch this
+repository to be notified when it reaches the next stage!
+
+## Overview
+
 This library is for when you need at-most-once pub/sub behavior across the
 network, but don't want to maintain open connections with your clients. For
 example, when subscribing to restart/upgrade requests within CI/CD, or for cache
