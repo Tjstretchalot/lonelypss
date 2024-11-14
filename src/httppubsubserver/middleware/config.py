@@ -1,7 +1,7 @@
 from fastapi import Request
 from starlette.types import ASGIApp, Scope, Receive, Send
 
-from src.httppubsubserver.config.config import Config
+from httppubsubserver.config.config import Config
 
 
 class ConfigMiddleware:

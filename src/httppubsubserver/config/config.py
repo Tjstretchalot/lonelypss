@@ -1,4 +1,4 @@
-from typing import AsyncGenerator, AsyncIterable, Literal, Optional, Protocol, Union
+from typing import AsyncIterable, Literal, Optional, Protocol, Union
 
 
 class AuthConfig(Protocol):
@@ -145,7 +145,7 @@ class DBConfig(Protocol):
 
     def get_subscribers(
         self, /, *, topic: bytes
-    ) -> AsyncIterable[Union[str, b"unavailable"]]:
+    ) -> AsyncIterable[Union[str, Literal[b"unavailable"]]]:
         """Streams back the subscriber urls that match the given topic. We will post messages
         to these urls as they are provided. This should return duplicates if multiple subscriptions
         match with the same url.

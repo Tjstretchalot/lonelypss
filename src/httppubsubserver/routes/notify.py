@@ -6,7 +6,7 @@ import hashlib
 import aiohttp
 import logging
 
-from src.httppubsubserver.middleware.ConfigMiddleware import get_config_from_request
+from httppubsubserver.middleware.config import get_config_from_request
 
 
 router = APIRouter()
@@ -140,20 +140,20 @@ async def notify(
                 request_body.seek(message_starts_at)
                 try:
                     async with session.post(
-                        my_authorization,
+                        url,
                         data=request_body,
                         headers={
-                            "Authorization": authorization,
+                            **({"Authorization": authorization} if authorization is not None else {}),
                             "Content-Type": "application/octet-stream",
                         },
                     ) as resp:
                         if resp.ok:
-                            logging.debug(f"Successfully notified {url} about {topic}")
+                            logging.debug(f"Successfully notified {url} about {topic!r}")
                         else:
                             logging.warning(
-                                f"Failed to notify {url} about {topic}: {resp.status}"
+                                f"Failed to notify {url} about {topic!r}: {resp.status}"
                             )
                 except aiohttp.ClientError:
                     logging.error(
-                        f"Failed to notify {url} about {topic}", exc_info=True
+                        f"Failed to notify {url} about {topic!r}", exc_info=True
                     )

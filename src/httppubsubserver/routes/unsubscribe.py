@@ -3,7 +3,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, Header, Request, Response
 import io
 
-from src.httppubsubserver.middleware.ConfigMiddleware import get_config_from_request
+from httppubsubserver.middleware.config import get_config_from_request
 
 
 router = APIRouter()
@@ -81,14 +81,16 @@ async def unsubscribe(
             return Response(status_code=400)
 
     auth_at = time.time()
-    if is_exact:
+    if exact is not None:
         auth_result = await config.is_subscribe_exact_allowed(
             url=url, exact=exact, now=auth_at, authorization=authorization
         )
-    else:
+    elif pattern is not None:
         auth_result = await config.is_subscribe_glob_allowed(
             url=url, glob=pattern, now=auth_at, authorization=authorization
         )
+    else:
+        raise AssertionError("unreachable")
 
     if auth_result == "unauthorized":
         return Response(status_code=401)
@@ -99,10 +101,12 @@ async def unsubscribe(
     elif auth_result != "ok":
         return Response(status_code=500)
 
-    if is_exact:
+    if exact is not None:
         db_result = await config.unsubscribe_exact(url=url, exact=exact)
-    else:
+    elif pattern is not None:
         db_result = await config.unsubscribe_glob(url=url, glob=pattern)
+    else:
+        raise AssertionError("unreachable")
 
     if db_result == "conflict":
         return Response(status_code=409)

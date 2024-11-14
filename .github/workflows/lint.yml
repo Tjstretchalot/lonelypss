@@ -28,3 +28,7 @@ jobs:
       - name: Lint httppubsubserver with black
         run: |
           python -m black --check src/httppubsubserver
+      - name: Type check httppubsubserver with mypy
+        working-directory: src
+        run: |
+          mypy httppubsubserver --explicit-package-bases
