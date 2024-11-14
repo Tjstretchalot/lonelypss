@@ -143,12 +143,18 @@ async def notify(
                         url,
                         data=request_body,
                         headers={
-                            **({"Authorization": authorization} if authorization is not None else {}),
+                            **(
+                                {"Authorization": authorization}
+                                if authorization is not None
+                                else {}
+                            ),
                             "Content-Type": "application/octet-stream",
                         },
                     ) as resp:
                         if resp.ok:
-                            logging.debug(f"Successfully notified {url} about {topic!r}")
+                            logging.debug(
+                                f"Successfully notified {url} about {topic!r}"
+                            )
                         else:
                             logging.warning(
                                 f"Failed to notify {url} about {topic!r}: {resp.status}"
