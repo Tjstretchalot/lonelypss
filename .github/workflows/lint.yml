@@ -8,10 +8,6 @@ jobs:
     strategy:
       matrix:
         python_version: [3.9, '3.10', '3.11', '3.12']
-    services:
-      rqlite:
-        image: rqlite/rqlite
-        options: -p4001:4001
     steps:
       - name: Setup Python ${{ matrix.python_version }}
         uses: actions/setup-python@v5
