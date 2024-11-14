@@ -1,4 +1,7 @@
 from argparse import ArgumentParser
+import json
+import os
+import secrets
 from typing import Literal, Optional
 
 
@@ -12,7 +15,7 @@ def main():
     parser.add_argument(
         "--db",
         default="sqlite",
-        choices=["memory", "sqlite", "rqlite"],
+        choices=["sqlite", "rqlite"],
         description="Which backing database to use",
     )
     parser.add_argument(
@@ -50,7 +53,7 @@ def main():
 
 def setup_locally(
     *,
-    db: Literal["memory", "sqlite", "rqlite"],
+    db: Literal["sqlite", "rqlite"],
     incoming_auth: Literal["hmac", "token", "none"],
     incoming_auth_token: Optional[str],
     outgoing_auth: Literal["hmac", "token", "none"],
@@ -64,6 +67,141 @@ def setup_locally(
         f"  - outgoing-auth: {outgoing_auth}\n"
         f"  - outgoing-auth-token: {'not specified' if outgoing_auth_token is None else 'specified'}"
     )
+
+    print("Prechecking...")
+    for file in [
+        "broadcast-secrets.json",
+        "subscriber-secrets.json",
+        "main.py",
+    ]:
+        if os.path.exists(file):
+            raise Exception(f"{file} already exists, refusing to overwrite")
+
+    print("Storing secrets...")
+    if incoming_auth_token is None:
+        incoming_auth_token = secrets.token_urlsafe(64)
+
+    if outgoing_auth_token is None:
+        outgoing_auth_token = secrets.token_urlsafe(64)
+
+    if incoming_auth != "none" or outgoing_auth != "none":
+        to_dump = (
+            json.dumps(
+                {
+                    "version": "1",
+                    **(
+                        {
+                            "incoming": {
+                                "type": incoming_auth,
+                                "secret": incoming_auth_token,
+                            }
+                        }
+                        if incoming_auth != "none"
+                        else {}
+                    ),
+                    **(
+                        {
+                            "outgoing": {
+                                "type": outgoing_auth,
+                                "secret": outgoing_auth_token,
+                            }
+                        }
+                        if outgoing_auth != "none"
+                        else {}
+                    ),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        with open("broadcaster-secrets.json", "w") as f:
+            f.write(to_dump)
+        with open("subscriber-secrets.json", "w") as f:
+            f.write(to_dump)
+
+    print("Building entrypoint...")
+
+    if db == "sqlite":
+        db_code = 'SqliteDBConfig("subscriptions.db")'
+    else:
+        db_code = "TODO()"
+
+    if incoming_auth == "token":
+        incoming_auth_code = f'IncomingTokenAuth(secrets["incoming"]["secret"])'
+    else:
+        incoming_auth_code = "TODO()"
+
+    if outgoing_auth == "token":
+        outgoing_auth_code = f'OutgoingTokenAuth(secrets["outgoing"]["secret"])'
+    else:
+        outgoing_auth_code = "TODO()"
+
+    with open("main.py", "w") as f:
+
+        f.write(
+            f"""from fastapi import FastAPI
+import httppubsubserver.config.helpers.{db}_db_config as db_config
+import httppubsubserver.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
+import httppubsubserver.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
+from httppubsubserver.middleware.config import ConfigMiddleware
+from httppubsubserver.config.config import (
+    AuthConfigFromParts,
+    ConfigFromParts,
+    GenericConfigFromValues
+)
+from httppubsubserver.router import router as HttpPubSubRouter
+import json
+
+def _make_config():
+    with open('broadcaster-secrets.json', 'r') as f:
+        secrets = json.load(f)
+
+    db = db_config.{db_code}
+    incoming_auth = incoming_auth_config.{incoming_auth_code}
+    outgoing_auth = outgoing_auth_config.{outgoing_auth_code}
+
+    return (
+        (db, incoming_auth, outgoing_auth), 
+        ConfigFromParts(
+            auth=AuthConfigFromParts(
+                incoming=incoming_auth, 
+                outgoing=outgoing_auth
+            ), 
+            db=db, 
+            generic=GenericConfigFromValues(
+                message_body_spool_size=1024 * 1024 * 10,
+                outgoing_http_timeout_total=30,
+                outgoing_http_timeout_connect=None,
+                outgoing_http_timeout_sock_read=5,
+                outgoing_http_timeout_sock_connect=5,
+            )
+        )
+    )
+
+config_acms, config = _make_config()
+
+app = FastAPI()
+app.add_middleware(
+    ConfigMiddleware,
+    config=config
+)
+app.include_router(HttpPubSubRouter)
+app.router.redirect_slashes = False
+
+
+@app.on_event('startup')
+async def setup():
+    for acm in config_acms:
+        await acm.__aenter__()
+
+        
+@app.on_event('shutdown')
+async def shutdown():
+    for acm in config_acms:
+        await acm.__aexit__(None, None, None)
+
+"""
+        )
 
 
 if __name__ == "__main__":

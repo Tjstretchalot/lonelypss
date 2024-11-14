@@ -147,7 +147,7 @@ async def notify(
                         headers={
                             **(
                                 {"Authorization": my_authorization}
-                                if authorization is not None
+                                if my_authorization is not None
                                 else {}
                             ),
                             "Content-Type": "application/octet-stream",
@@ -169,8 +169,8 @@ async def notify(
 
         return Response(
             status_code=200,
-            content=b"{\"notified\": " + str(num_succeeded).encode("ascii") + b"}",
+            content=b'{"notified": ' + str(num_succeeded).encode("ascii") + b"}",
             headers={
                 "Content-Type": "application/json; charset=utf-8",
-            }
+            },
         )

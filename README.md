@@ -36,9 +36,8 @@ that.
 ## Additional Features
 
 - glob-style pattern matching for subscriptions (e.g., `foo/*` will match
-  `foo/bar`, `foo/baz`, etc.). uses
-  [glob.translate](https://docs.python.org/3/library/glob.html#glob.translate)
-  to convert the pattern to a regex
+  `foo/bar`, `foo/baz`, etc.). exact semantics may differ but will generally behave
+  like unix file globbing syntax.
 - can optionally require an authorization token for receiving configuration requests (https required)
 - can optionally require hmac-based message signing for receiving messages (https not required)
 - can optionally provide an authorization token for sending messages (https required)
@@ -98,8 +97,8 @@ pip install -r requirements.txt
 # broadcaster-secrets.json contains the secrets that the broadcaster needs - by default,
 #   main.py will load from this to reduce the odds you accidentally check them in
 
-# client-secrets.json contains the secrets that the client needs; see the `httppubserver` package
-#  for more information on how to use this
+# subscriber-secrets.json contains the secrets that the subscribers need; see the
+#  `httppubserver` package for more information on how to use this.
 
 # Run the server
 uvicorn main:app
@@ -107,9 +106,7 @@ uvicorn main:app
 
 Comes with the following database options:
 
-- `memory`: keep all subscriptions in memory. mostly used for testing or as a
-  performance comparison
-- `sqlite`: execute SQL commands on a local, disk-backed SQLite database via the
+- `sqlite`: execute SQL commands on a local, memory or disk-backed SQLite database via the
   [sqlite3](https://docs.python.org/3/library/sqlite3.html) built-in library.
 - `rqlite`: execute SQL commands on a [rqlite](https://github.com/rqlite/rqlite)
   cluster via [rqdb](https://github.com/Tjstretchalot/rqdb) to connect to a
