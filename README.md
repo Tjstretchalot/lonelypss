@@ -1,4 +1,4 @@
-# httppubsub
+# httppubsubserver
 
 ## PROJECT STAGE - PLANNING
 
