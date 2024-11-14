@@ -24,4 +24,4 @@ dependencies = [
 ]
 
 [project.scripts]
-httppubsubserver = "httppubsubserver:main"
+httppubsubserver = "httppubsubserver.main:main"

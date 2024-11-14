@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 import json
 import os
 import secrets
-from typing import Literal, Optional
+from typing import Literal, Optional, Set
 
 
 def main():
@@ -10,33 +10,33 @@ def main():
     parser.add_argument(
         "--setup",
         action="store_true",
-        description="Always required for clarity of the operation.",
+        help="Always required for clarity of the operation.",
     )
     parser.add_argument(
         "--db",
         default="sqlite",
         choices=["sqlite", "rqlite"],
-        description="Which backing database to use",
+        help="Which backing database to use",
     )
     parser.add_argument(
         "--incoming-auth",
         default="hmac",
         choices=["hmac", "token", "none"],
-        description="How to verify incoming requests to subscribe or unsubscribe from endpoints",
+        help="How to verify incoming requests to subscribe or unsubscribe from endpoints",
     )
     parser.add_argument(
         "--incoming-auth-token",
-        description="If specified, the secret to use for incoming auth. Ignored unless the incoming auth strategy requires a secret (hmac, token)",
+        help="If specified, the secret to use for incoming auth. Ignored unless the incoming auth strategy requires a secret (hmac, token)",
     )
     parser.add_argument(
         "--outgoing-auth",
         default="hmac",
         choices=["hmac", "token", "none"],
-        description="How to verify outgoing requests notifying subscribers",
+        help="How to verify outgoing requests notifying subscribers",
     )
     parser.add_argument(
         "--outgoing-auth-token",
-        description="If specified, the secret to use for outgoing auth. Ignored unless the outgoing auth strategy requires a secret (hmac, token)",
+        help="If specified, the secret to use for outgoing auth. Ignored unless the outgoing auth strategy requires a secret (hmac, token)",
     )
     args = parser.parse_args()
     if not args.setup:
@@ -73,6 +73,7 @@ def setup_locally(
         "broadcast-secrets.json",
         "subscriber-secrets.json",
         "main.py",
+        "requirements.txt",
     ]:
         if os.path.exists(file):
             raise Exception(f"{file} already exists, refusing to overwrite")
@@ -121,25 +122,32 @@ def setup_locally(
 
     print("Building entrypoint...")
 
+    requirements: Set[str] = set()
+
     if db == "sqlite":
         db_code = 'SqliteDBConfig("subscriptions.db")'
     else:
         db_code = "TODO()"
 
     if incoming_auth == "token":
-        incoming_auth_code = f'IncomingTokenAuth(secrets["incoming"]["secret"])'
+        incoming_auth_code = (
+            f'IncomingTokenAuth(\n        secrets["incoming"]["secret"]\n    )'
+        )
     else:
         incoming_auth_code = "TODO()"
 
     if outgoing_auth == "token":
-        outgoing_auth_code = f'OutgoingTokenAuth(secrets["outgoing"]["secret"])'
+        outgoing_auth_code = (
+            f'OutgoingTokenAuth(\n        secrets["outgoing"]["secret"]\n    )'
+        )
     else:
         outgoing_auth_code = "TODO()"
 
     with open("main.py", "w") as f:
 
         f.write(
-            f"""from fastapi import FastAPI
+            f"""from contextlib import asynccontextmanager
+from fastapi import FastAPI
 import httppubsubserver.config.helpers.{db}_db_config as db_config
 import httppubsubserver.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
 import httppubsubserver.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
@@ -147,13 +155,14 @@ from httppubsubserver.middleware.config import ConfigMiddleware
 from httppubsubserver.config.config import (
     AuthConfigFromParts,
     ConfigFromParts,
-    GenericConfigFromValues
+    GenericConfigFromValues,
 )
 from httppubsubserver.router import router as HttpPubSubRouter
 import json
 
+
 def _make_config():
-    with open('broadcaster-secrets.json', 'r') as f:
+    with open("broadcaster-secrets.json", "r") as f:
         secrets = json.load(f)
 
     db = db_config.{db_code}
@@ -161,12 +170,9 @@ def _make_config():
     outgoing_auth = outgoing_auth_config.{outgoing_auth_code}
 
     return (
-        (db, incoming_auth, outgoing_auth), 
+        (db, incoming_auth, outgoing_auth),
         ConfigFromParts(
-            auth=AuthConfigFromParts(
-                incoming=incoming_auth, 
-                outgoing=outgoing_auth
-            ), 
+            auth=AuthConfigFromParts(incoming=incoming_auth, outgoing=outgoing_auth),
             db=db, 
             generic=GenericConfigFromValues(
                 message_body_spool_size=1024 * 1024 * 10,
@@ -174,34 +180,33 @@ def _make_config():
                 outgoing_http_timeout_connect=None,
                 outgoing_http_timeout_sock_read=5,
                 outgoing_http_timeout_sock_connect=5,
-            )
-        )
+            ),
+        ),
     )
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    for acm in config_acms:
+        await acm.__aenter__()
+    yield
+    for acm in config_acms:
+        await acm.__aexit__(None, None, None)
+
 
 config_acms, config = _make_config()
 
 app = FastAPI()
-app.add_middleware(
-    ConfigMiddleware,
-    config=config
-)
+app.add_middleware(ConfigMiddleware, config=config)
 app.include_router(HttpPubSubRouter)
 app.router.redirect_slashes = False
-
-
-@app.on_event('startup')
-async def setup():
-    for acm in config_acms:
-        await acm.__aenter__()
-
-        
-@app.on_event('shutdown')
-async def shutdown():
-    for acm in config_acms:
-        await acm.__aexit__(None, None, None)
-
 """
         )
+
+    with open("requirements.txt", "w") as f:
+        f.write("\n".join(list(sorted(requirements))))
+
+    print("Done! Make sure to install from requirements.txt and pip freeze again!")
 
 
 if __name__ == "__main__":

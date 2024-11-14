@@ -92,7 +92,7 @@ class OutgoingAuthConfig(Protocol):
         """
 
 
-class AuthConfig(Protocol, IncomingAuthConfig, OutgoingAuthConfig): ...
+class AuthConfig(IncomingAuthConfig, OutgoingAuthConfig, Protocol): ...
 
 
 class AuthConfigFromParts:
@@ -264,7 +264,7 @@ class GenericConfigFromValues:
         self.outgoing_http_timeout_sock_connect = outgoing_http_timeout_sock_connect
 
 
-class Config(Protocol, AuthConfig, DBConfig, GenericConfig):
+class Config(AuthConfig, DBConfig, GenericConfig, Protocol):
     """The injected behavior required for the httppubsubserver to operate. This is
     generally generated for you using one of the templates, see the readme for details
     """

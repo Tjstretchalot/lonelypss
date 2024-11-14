@@ -92,6 +92,7 @@ pip install httppubsubserver
 
 httppubsubserver --setup --db sqlite --incoming-auth hmac --outgoing-auth hmac
 pip install -r requirements.txt
+pip freeze > requirements.txt
 
 # main.py will be generated that exports a Config object; feel free to modify as you wish
 # broadcaster-secrets.json contains the secrets that the broadcaster needs - by default,
