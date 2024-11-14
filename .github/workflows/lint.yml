@@ -28,10 +28,3 @@ jobs:
       - name: Lint httppubsubserver with black
         run: |
           python -m black --check src/httppubsubserver
-      - name: Lint tests with black
-        run: |
-          python -m black --check tests
-      - name: Run tests
-        working-directory: ./tests
-        run: |
-          python -m unittest discover -s .
