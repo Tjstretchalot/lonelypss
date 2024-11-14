@@ -35,10 +35,11 @@ async def notify(
     - 8 bytes: the length of the message, big-endian, unsigned
     - M bytes: the message to send. must have the same hash as the provided hash
 
-    The response has an arbitrary body (generally empty) and one of the
-    following status codes:
+    The response has one of the following status codes, where the body is arbitrary
+    unless otherwise specified.
 
-    - 200 Okay: subscribers were notified
+    - 200 Okay: subscribers were notified. Response body is in JSON format,
+      containing the `notified` key with the number of subscribers notified.
     - 400 Bad Request: the body was not formatted correctly
     - 401 Unauthorized: authorization is required but not provided
     - 403 Forbidden: authorization is provided but invalid
@@ -120,6 +121,7 @@ async def notify(
             return Response(status_code=400)
 
         message_starts_at = 2 + topic_length + 64 + 8
+        num_succeeded = 0
 
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
@@ -155,6 +157,7 @@ async def notify(
                             logging.debug(
                                 f"Successfully notified {url} about {topic!r}"
                             )
+                            num_succeeded += 1
                         else:
                             logging.warning(
                                 f"Failed to notify {url} about {topic!r}: {resp.status}"
@@ -163,3 +166,11 @@ async def notify(
                     logging.error(
                         f"Failed to notify {url} about {topic!r}", exc_info=True
                     )
+
+        return Response(
+            status_code=200,
+            content=b"{\"notified\": " + str(num_succeeded).encode("ascii") + b"}",
+            headers={
+                "Content-Type": "application/json; charset=utf-8",
+            }
+        )
