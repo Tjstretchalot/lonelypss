@@ -2,6 +2,18 @@ from typing import TYPE_CHECKING, Literal, Optional, Protocol, Type
 
 
 class IncomingAuthConfig(Protocol):
+    async def setup_incoming_auth(self) -> None:
+        """Prepares this authorization instance for use. If the incoming auth config
+        is not re-entrant (i.e., it cannot be used by two clients simultaneously), it
+        must detect this and error out.
+        """
+
+    async def teardown_incoming_auth(self) -> None:
+        """Cleans up this authorization instance after use. This is called when a
+        client is done using the auth config, and should release any resources it
+        acquired during `setup_incoming_auth`.
+        """
+
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -67,6 +79,18 @@ class IncomingAuthConfig(Protocol):
 
 
 class OutgoingAuthConfig(Protocol):
+    async def setup_outgoing_auth(self) -> None:
+        """Prepares this authorization instance for use. If the outgoing auth config
+        is not re-entrant (i.e., it cannot be used by two clients simultaneously), it
+        must detect this and error out.
+        """
+
+    async def teardown_outgoing_auth(self) -> None:
+        """Cleans up this authorization instance after use. This is called when a
+        client is done using the auth config, and should release any resources it
+        acquired during `setup_outgoing_auth`.
+        """
+
     async def setup_authorization(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
     ) -> Optional[str]:
@@ -96,6 +120,18 @@ class AuthConfigFromParts:
     def __init__(self, incoming: IncomingAuthConfig, outgoing: OutgoingAuthConfig):
         self.incoming = incoming
         self.outgoing = outgoing
+
+    async def setup_incoming_auth(self) -> None:
+        await self.incoming.setup_incoming_auth()
+
+    async def teardown_incoming_auth(self) -> None:
+        await self.incoming.teardown_incoming_auth()
+
+    async def setup_outgoing_auth(self) -> None:
+        await self.outgoing.setup_outgoing_auth()
+
+    async def teardown_outgoing_auth(self) -> None:
+        await self.outgoing.teardown_outgoing_auth()
 
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]

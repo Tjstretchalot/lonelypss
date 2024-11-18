@@ -129,10 +129,12 @@ def setup_locally(
     else:
         db_code = "TODO()"
 
+    need_secrets = False
     if incoming_auth == "token":
         incoming_auth_code = (
-            f'IncomingTokenAuth(\n        secrets["incoming"]["secret"]\n    )'
+            f'IncomingTokenAuth(\n        auth_secrets["incoming"]["secret"]\n    )'
         )
+        need_secrets = True
     elif incoming_auth == "none":
         incoming_auth_code = "IncomingNoneAuth()"
     else:
@@ -140,12 +142,23 @@ def setup_locally(
 
     if outgoing_auth == "token":
         outgoing_auth_code = (
-            f'OutgoingTokenAuth(\n        secrets["outgoing"]["secret"]\n    )'
+            f'OutgoingTokenAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
         )
+        need_secrets = True
     elif outgoing_auth == "none":
         outgoing_auth_code = "OutgoingNoneAuth()"
     else:
         outgoing_auth_code = "TODO()"
+
+    load_auth_secrets = (
+        ""
+        if not need_secrets
+        else """
+    with open("broadcaster-secrets.json", "r") as f:
+        auth_secrets = json.load(f)
+"""
+    )
+    import_json = "\nimport json" if need_secrets else ""
 
     with open("main.py", "w") as f:
 
@@ -156,50 +169,41 @@ import httppubsubserver.config.helpers.{db}_db_config as db_config
 import httppubsubserver.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
 import httppubsubserver.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
 from httppubsubserver.middleware.config import ConfigMiddleware
+from httppubsubserver.config.lifespan import setup_config, teardown_config
+from httppubsubserver.config.auth_config import AuthConfigFromParts
 from httppubsubserver.config.config import (
-    AuthConfigFromParts,
     ConfigFromParts,
     GenericConfigFromValues,
 )
-from httppubsubserver.router import router as HttpPubSubRouter
-import json
+from httppubsubserver.router import router as HttpPubSubRouter{import_json}
 
 
-def _make_config():
-    with open("broadcaster-secrets.json", "r") as f:
-        secrets = json.load(f)
-
+def _make_config():{load_auth_secrets}
     db = db_config.{db_code}
     incoming_auth = incoming_auth_config.{incoming_auth_code}
     outgoing_auth = outgoing_auth_config.{outgoing_auth_code}
 
-    return (
-        (db, incoming_auth, outgoing_auth),
-        ConfigFromParts(
-            auth=AuthConfigFromParts(incoming=incoming_auth, outgoing=outgoing_auth),
-            db=db, 
-            generic=GenericConfigFromValues(
-                message_body_spool_size=1024 * 1024 * 10,
-                outgoing_http_timeout_total=30,
-                outgoing_http_timeout_connect=None,
-                outgoing_http_timeout_sock_read=5,
-                outgoing_http_timeout_sock_connect=5,
-            ),
+    return ConfigFromParts(
+        auth=AuthConfigFromParts(incoming=incoming_auth, outgoing=outgoing_auth),
+        db=db,
+        generic=GenericConfigFromValues(
+            message_body_spool_size=1024 * 1024 * 10,
+            outgoing_http_timeout_total=30,
+            outgoing_http_timeout_connect=None,
+            outgoing_http_timeout_sock_read=5,
+            outgoing_http_timeout_sock_connect=5,
         ),
     )
 
 
-config_acms, config = _make_config()
+config = _make_config()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    for acm in config_acms:
-        await acm.__aenter__()
+    await setup_config(config)
     yield
-    for acm in config_acms:
-        await acm.__aexit__(None, None, None)
-
+    await teardown_config(config)
 
 
 app = FastAPI()

@@ -12,6 +12,17 @@ from httppubsubserver.config.auth_config import AuthConfig
 
 
 class DBConfig(Protocol):
+    async def setup_db(self) -> None:
+        """Prepares the database for use. If the database is not re-entrant, it must
+        check for re-entrant calls and error out
+        """
+
+    async def teardown_db(self) -> None:
+        """Cleans up the database after use. This is called when the server is done
+        using the database, and should release any resources it acquired during
+        `setup_db`.
+        """
+
     async def subscribe_exact(
         self, /, *, url: str, exact: bytes
     ) -> Literal["success", "conflict", "unavailable"]:
@@ -146,6 +157,24 @@ class ConfigFromParts:
         self.auth = auth
         self.db = db
         self.generic = generic
+
+    async def setup_incoming_auth(self) -> None:
+        await self.auth.setup_incoming_auth()
+
+    async def teardown_incoming_auth(self) -> None:
+        await self.auth.teardown_incoming_auth()
+
+    async def setup_outgoing_auth(self) -> None:
+        await self.auth.setup_outgoing_auth()
+
+    async def teardown_outgoing_auth(self) -> None:
+        await self.auth.teardown_outgoing_auth()
+
+    async def setup_db(self) -> None:
+        await self.db.setup_db()
+
+    async def teardown_db(self) -> None:
+        await self.db.teardown_db()
 
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]

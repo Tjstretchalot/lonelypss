@@ -20,11 +20,8 @@ class IncomingTokenAuth:
         self.expecting = f"Bearer {token}"
         """The exact authorization header we accept"""
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass
+    async def setup_incoming_auth(self) -> None: ...
+    async def teardown_incoming_auth(self) -> None: ...
 
     def _check_header(
         self, authorization: Optional[str]
@@ -67,11 +64,8 @@ class OutgoingTokenAuth:
         self.authorization = f"Bearer {token}"
         """The exact authorization header we set"""
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass
+    async def setup_outgoing_auth(self) -> None: ...
+    async def teardown_outgoing_auth(self) -> None: ...
 
     async def setup_authorization(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float

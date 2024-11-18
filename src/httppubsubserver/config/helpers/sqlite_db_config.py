@@ -6,10 +6,7 @@ if TYPE_CHECKING:
 
 
 class SqliteDBConfig:
-    """Implements the DBConfig protocol using a locally hosted SQLite database.
-    Acts as an async context manager, though if just using it until closing it's
-    often more convenient to call aenter/aexit directly.
-    """
+    """Implements the DBConfig protocol using a locally hosted SQLite database."""
 
     def __init__(self, database: str) -> None:
         self.database = database
@@ -19,13 +16,13 @@ class SqliteDBConfig:
         """
 
         self.connection: Optional[sqlite3.Connection] = None
-        """If we've been __aenter__'d, the current connection to the database."""
+        """If we've been setup, the current connection to the database."""
 
         self.cursor: Optional[sqlite3.Cursor] = None
-        """If we've been __aenter__'d, the current cursor to the database."""
+        """If we've been setup, the current cursor to the database."""
 
-    async def __aenter__(self):
-        assert self.connection is None, "already __aenter__'d"
+    async def setup_db(self) -> None:
+        assert self.connection is None, "sqlite db config is not re-entrant"
         connection = sqlite3.connect(self.database)
         cursor = connection.cursor()
 
@@ -59,9 +56,8 @@ CREATE TABLE IF NOT EXISTS httppubsub_subscription_globs (
 
         self.connection = connection
         self.cursor = cursor
-        return self
 
-    async def __aexit__(self, exc_type, exc, tb) -> None:
+    async def teardown_db(self) -> None:
         exc1: Optional[BaseException] = None
         exc2: Optional[BaseException] = None
         if self.cursor is not None:
@@ -86,9 +82,7 @@ CREATE TABLE IF NOT EXISTS httppubsub_subscription_globs (
     async def subscribe_exact(
         self, /, *, url: str, exact: bytes
     ) -> Literal["success", "conflict", "unavailable"]:
-        assert (
-            self.cursor is not None and self.connection is not None
-        ), "not __aenter__'d"
+        assert self.cursor is not None and self.connection is not None, "db not setup"
         self.cursor.execute(
             """
 INSERT INTO httppubsub_subscription_exacts (url, exact)
@@ -109,9 +103,7 @@ WHERE
     async def unsubscribe_exact(
         self, /, *, url: str, exact: bytes
     ) -> Literal["success", "not_found", "unavailable"]:
-        assert (
-            self.cursor is not None and self.connection is not None
-        ), "not __aenter__'d"
+        assert self.cursor is not None and self.connection is not None, "db not setup"
 
         self.cursor.execute(
             "DELETE FROM httppubsub_subscription_exacts WHERE url = ? AND exact = ?",
@@ -125,9 +117,7 @@ WHERE
     async def subscribe_glob(
         self, /, *, url: str, glob: str
     ) -> Literal["success", "conflict", "unavailable"]:
-        assert (
-            self.cursor is not None and self.connection is not None
-        ), "not __aenter__'d"
+        assert self.cursor is not None and self.connection is not None, "db not setup"
         self.cursor.execute(
             """
 INSERT INTO httppubsub_subscription_globs (url, glob)
@@ -148,9 +138,7 @@ WHERE
     async def unsubscribe_glob(
         self, /, *, url: str, glob: str
     ) -> Literal["success", "not_found", "unavailable"]:
-        assert (
-            self.cursor is not None and self.connection is not None
-        ), "not __aenter__'d"
+        assert self.cursor is not None and self.connection is not None, "db not setup"
         self.cursor.execute(
             "DELETE FROM httppubsub_subscription_globs WHERE url = ? AND glob = ?",
             (url, glob),
@@ -162,7 +150,7 @@ WHERE
     async def get_subscribers(
         self, /, *, topic: bytes
     ) -> AsyncIterable[Union[str, Literal[b"unavailable"]]]:
-        assert self.connection is not None, "not __aenter__'d"
+        assert self.connection is not None, "db not setup"
         cursor = self.connection.cursor()
         try:
             cursor.execute(

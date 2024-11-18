@@ -15,11 +15,8 @@ class IncomingNoneAuth:
     level)
     """
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass
+    async def setup_incoming_auth(self) -> None: ...
+    async def teardown_incoming_auth(self) -> None: ...
 
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
@@ -48,11 +45,8 @@ class OutgoingNoneAuth:
     subscribers must only be able to receive messages from trusted clients.
     """
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass
+    async def setup_outgoing_auth(self) -> None: ...
+    async def teardown_outgoing_auth(self) -> None: ...
 
     async def setup_authorization(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
