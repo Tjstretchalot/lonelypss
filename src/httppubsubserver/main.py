@@ -133,6 +133,8 @@ def setup_locally(
         incoming_auth_code = (
             f'IncomingTokenAuth(\n        secrets["incoming"]["secret"]\n    )'
         )
+    elif incoming_auth == "none":
+        incoming_auth_code = "IncomingNoneAuth()"
     else:
         incoming_auth_code = "TODO()"
 
@@ -140,6 +142,8 @@ def setup_locally(
         outgoing_auth_code = (
             f'OutgoingTokenAuth(\n        secrets["outgoing"]["secret"]\n    )'
         )
+    elif outgoing_auth == "none":
+        outgoing_auth_code = "OutgoingNoneAuth()"
     else:
         outgoing_auth_code = "TODO()"
 
@@ -185,6 +189,9 @@ def _make_config():
     )
 
 
+config_acms, config = _make_config()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     for acm in config_acms:
@@ -194,7 +201,6 @@ async def lifespan(app: FastAPI):
         await acm.__aexit__(None, None, None)
 
 
-config_acms, config = _make_config()
 
 app = FastAPI()
 app.add_middleware(ConfigMiddleware, config=config)

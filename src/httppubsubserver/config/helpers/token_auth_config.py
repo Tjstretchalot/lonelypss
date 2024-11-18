@@ -2,7 +2,10 @@ import hmac
 from typing import Literal, Optional, TYPE_CHECKING, Type
 
 if TYPE_CHECKING:
-    from httppubsubserver.config.config import IncomingAuthConfig, OutgoingAuthConfig
+    from httppubsubserver.config.auth_config import (
+        IncomingAuthConfig,
+        OutgoingAuthConfig,
+    )
 
 
 class IncomingTokenAuth:

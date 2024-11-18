@@ -8,7 +8,7 @@ repository to be notified when it reaches the next stage!
 
 ## Overview
 
-This library is for when you need at-most-once pub/sub behavior across the
+This library is for when you need best-effort pub/sub behavior across the
 network, but don't want to maintain open connections with your clients. For
 example, when subscribing to restart/upgrade requests within CI/CD, or for cache
 busting local instance disk caches, or when revoked JSON web tokens early due to
