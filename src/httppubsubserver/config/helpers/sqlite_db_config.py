@@ -1,5 +1,10 @@
 import sqlite3
-from typing import TYPE_CHECKING, AsyncIterable, Literal, Optional, Type, Union
+from typing import TYPE_CHECKING, AsyncIterable, Literal, Optional, Type
+from httppubsubserver.config.config import (
+    SubscriberInfo,
+    SubscriberInfoExact,
+    SubscriberInfoGlob,
+)
 
 if TYPE_CHECKING:
     from httppubsubserver.config.config import DBConfig
@@ -149,7 +154,7 @@ WHERE
 
     async def get_subscribers(
         self, /, *, topic: bytes
-    ) -> AsyncIterable[Union[str, Literal[b"unavailable"]]]:
+    ) -> AsyncIterable[SubscriberInfo]:
         assert self.connection is not None, "db not setup"
         cursor = self.connection.cursor()
         try:
@@ -160,17 +165,17 @@ WHERE
                 row = cursor.fetchone()
                 if row is None:
                     break
-                yield row[0]
+                yield SubscriberInfoExact(type="exact", url=row[0])
 
             cursor.execute(
-                "SELECT url FROM httppubsub_subscription_globs WHERE glob GLOB ?",
+                "SELECT glob, url FROM httppubsub_subscription_globs WHERE glob GLOB ?",
                 (topic,),
             )
             while True:
                 row = cursor.fetchone()
                 if row is None:
                     break
-                yield row[0]
+                yield SubscriberInfoGlob(type="glob", glob=row[0], url=row[1])
         finally:
             cursor.close()
 

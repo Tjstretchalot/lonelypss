@@ -4,11 +4,40 @@ from typing import (
     Optional,
     Protocol,
     Type,
+    TypedDict,
     Union,
     TYPE_CHECKING,
 )
 
 from httppubsubserver.config.auth_config import AuthConfig
+
+
+class SubscriberInfoExact(TypedDict):
+    type: Literal["exact"]
+    """Indicates we found a subscriber on this exact topic"""
+    url: str
+    """The url to reach the subscriber"""
+
+
+class SubscriberInfoGlob(TypedDict):
+    type: Literal["glob"]
+    """Indicates we found a subscriber for this topic via a matching glob subscription"""
+    glob: str
+    """The glob that matched the topic"""
+    url: str
+    """The url to reach the subscriber"""
+
+
+class SubscriberInfoUnavailable(TypedDict):
+    type: Literal["unavailable"]
+    """Indicates that the database for subscriptions is unavailable
+    and the request should be aborted with a 503
+    """
+
+
+SubscriberInfo = Union[
+    SubscriberInfoExact, SubscriberInfoGlob, SubscriberInfoUnavailable
+]
 
 
 class DBConfig(Protocol):
@@ -83,9 +112,7 @@ class DBConfig(Protocol):
             `unavailable`: if the database for subscriptions is unavailable
         """
 
-    def get_subscribers(
-        self, /, *, topic: bytes
-    ) -> AsyncIterable[Union[str, Literal[b"unavailable"]]]:
+    def get_subscribers(self, /, *, topic: bytes) -> AsyncIterable[SubscriberInfo]:
         """Streams back the subscriber urls that match the given topic. We will post messages
         to these urls as they are provided. This should return duplicates if multiple subscriptions
         match with the same url.
@@ -94,8 +121,9 @@ class DBConfig(Protocol):
             topic (bytes): the topic that we are looking for
 
         Yields:
-            str: the urls that match the topic
-            b'unavailable': if the database for subscriptions is unavailable
+            (SubscriberInfo): the subscriber that was found, or a special value indicating
+                that the database is unavailable.
+                Example: `{"type": "exact", "url": "http://example.com/v1/receive"}`
         """
 
 
@@ -233,9 +261,7 @@ class ConfigFromParts:
     ) -> Literal["success", "not_found", "unavailable"]:
         return await self.db.unsubscribe_glob(url=url, glob=glob)
 
-    def get_subscribers(
-        self, /, *, topic: bytes
-    ) -> AsyncIterable[Union[str, Literal[b"unavailable"]]]:
+    def get_subscribers(self, /, *, topic: bytes) -> AsyncIterable[SubscriberInfo]:
         return self.db.get_subscribers(topic=topic)
 
     @property

@@ -1,6 +1,9 @@
+import base64
+import json
 import tempfile
 import time
-from typing import Annotated, Optional
+from typing import Annotated, Dict, Optional
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Header, Request, Response
 import hashlib
 import aiohttp
@@ -9,12 +12,17 @@ import logging
 from httppubsubserver.middleware.config import get_config_from_request
 
 
+class NotifyResponse(BaseModel):
+    notified: int = Field(description="The number of subscribers successfully notified")
+
+
 router = APIRouter()
 
 
 @router.post(
     "/v1/notify",
     status_code=200,
+    response_model=NotifyResponse,
     responses={
         "400": {"description": "The body was not formatted correctly"},
         "401": {"description": "Authorization header is required but not provided"},
@@ -123,6 +131,13 @@ async def notify(
         message_starts_at = 2 + topic_length + 64 + 8
         num_succeeded = 0
 
+        headers: Dict[str, str] = {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": str(message_length).encode("ascii"),
+            "Repr-Digest": f"sha-512={base64.b64encode(message_hash).decode('ascii')}",
+            "X-Topic": base64.b64encode(topic).decode("ascii"),
+        }
+
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
                 total=config.outgoing_http_timeout_total,
@@ -131,27 +146,25 @@ async def notify(
                 sock_connect=config.outgoing_http_timeout_sock_connect,
             )
         ) as session:
-            async for url in config.get_subscribers(topic=topic):
-                if url == b"unavailable":
+            async for subscriber in config.get_subscribers(topic=topic):
+                if subscriber["type"] == "unavailable":
                     return Response(status_code=503)
 
+                url = subscriber["url"]
                 my_authorization = await config.setup_authorization(
                     url=url, topic=topic, message_sha512=message_hash, now=time.time()
                 )
+                if my_authorization is None:
+                    headers.pop("Authorization", None)
+                else:
+                    headers["Authorization"] = my_authorization
 
                 request_body.seek(message_starts_at)
                 try:
                     async with session.post(
                         url,
                         data=request_body,
-                        headers={
-                            **(
-                                {"Authorization": my_authorization}
-                                if my_authorization is not None
-                                else {}
-                            ),
-                            "Content-Type": "application/octet-stream",
-                        },
+                        headers=headers,
                     ) as resp:
                         if resp.ok:
                             logging.debug(
@@ -162,6 +175,30 @@ async def notify(
                             logging.warning(
                                 f"Failed to notify {url} about {topic!r}: {resp.status}"
                             )
+
+                            if resp.status >= 400 and resp.status < 500:
+                                content_type = resp.headers.get("Content-Type")
+                                if (
+                                    content_type is not None
+                                    and content_type.startswith("application/json")
+                                ):
+                                    content = await resp.json()
+                                    if (
+                                        isinstance(content, dict)
+                                        and content.get("unsubscribe") is True
+                                    ):
+                                        logging.info(
+                                            f"Unsubscribing {url} from {topic!r} due to response: {json.dumps(content)}"
+                                        )
+
+                                        if subscriber["type"] == "exact":
+                                            await config.unsubscribe_exact(
+                                                url=url, exact=topic
+                                            )
+                                        else:
+                                            await config.unsubscribe_glob(
+                                                url=url, glob=subscriber["glob"]
+                                            )
                 except aiohttp.ClientError:
                     logging.error(
                         f"Failed to notify {url} about {topic!r}", exc_info=True
@@ -169,7 +206,9 @@ async def notify(
 
         return Response(
             status_code=200,
-            content=b'{"notified": ' + str(num_succeeded).encode("ascii") + b"}",
+            content=NotifyResponse.__pydantic_serializer__.to_json(
+                NotifyResponse(notified=num_succeeded)
+            ),
             headers={
                 "Content-Type": "application/json; charset=utf-8",
             },
