@@ -133,7 +133,7 @@ async def notify(
 
         headers: Dict[str, str] = {
             "Content-Type": "application/octet-stream",
-            "Content-Length": str(message_length).encode("ascii"),
+            "Content-Length": str(message_length),
             "Repr-Digest": f"sha-512={base64.b64encode(message_hash).decode('ascii')}",
             "X-Topic": base64.b64encode(topic).decode("ascii"),
         }
