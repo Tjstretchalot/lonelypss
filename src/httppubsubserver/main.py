@@ -85,39 +85,63 @@ def setup_locally(
     if outgoing_auth_token is None:
         outgoing_auth_token = secrets.token_urlsafe(64)
 
-    to_dump = (
-        json.dumps(
-            {
-                "version": "1",
-                **(
-                    {
-                        "incoming": {
-                            "type": incoming_auth,
-                            "secret": incoming_auth_token,
-                        }
-                    }
-                    if incoming_auth != "none"
-                    else {}
-                ),
-                **(
-                    {
-                        "outgoing": {
-                            "type": outgoing_auth,
-                            "secret": outgoing_auth_token,
-                        }
-                    }
-                    if outgoing_auth != "none"
-                    else {}
-                ),
-            },
-            indent=2,
-        )
-        + "\n"
+    auth_for_requests_to_broadcasters = (
+        {
+            "type": incoming_auth,
+            "secret": incoming_auth_token,
+        }
+        if incoming_auth != "none"
+        else None
     )
+    auth_for_requests_to_subscribers = (
+        {
+            "type": outgoing_auth,
+            "secret": outgoing_auth_token,
+        }
+        if outgoing_auth != "none"
+        else None
+    )
+
     with open("broadcaster-secrets.json", "w") as f:
-        f.write(to_dump)
+        f.write(
+            json.dumps(
+                {
+                    "version": "1",
+                    **(
+                        {"incoming": auth_for_requests_to_broadcasters}
+                        if auth_for_requests_to_broadcasters is not None
+                        else {}
+                    ),
+                    **(
+                        {"outgoing": (auth_for_requests_to_subscribers)}
+                        if auth_for_requests_to_subscribers is not None
+                        else {}
+                    ),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
     with open("subscriber-secrets.json", "w") as f:
-        f.write(to_dump)
+        f.write(
+            json.dumps(
+                {
+                    "version": "1",
+                    **(
+                        {"outgoing": auth_for_requests_to_broadcasters}
+                        if auth_for_requests_to_broadcasters is not None
+                        else {}
+                    ),
+                    **(
+                        {"incoming": (auth_for_requests_to_subscribers)}
+                        if auth_for_requests_to_subscribers is not None
+                        else {}
+                    ),
+                },
+                indent=2,
+            )
+            + "\n"
+        )
 
     print("Building entrypoint...")
 

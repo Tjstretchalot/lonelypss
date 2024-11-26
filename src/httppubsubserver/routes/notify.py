@@ -10,6 +10,7 @@ import aiohttp
 import logging
 
 from httppubsubserver.middleware.config import get_config_from_request
+from httppubsubserver.util.close_guarded_io import CloseGuardedIO
 
 
 class NotifyResponse(BaseModel):
@@ -138,6 +139,8 @@ async def notify(
             "X-Topic": base64.b64encode(topic).decode("ascii"),
         }
 
+        guarded_request_body = CloseGuardedIO(request_body)
+
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
                 total=config.outgoing_http_timeout_total,
@@ -163,7 +166,7 @@ async def notify(
                 try:
                     async with session.post(
                         url,
-                        data=request_body,
+                        data=guarded_request_body,
                         headers=headers,
                     ) as resp:
                         if resp.ok:
