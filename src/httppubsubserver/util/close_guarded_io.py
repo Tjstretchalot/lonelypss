@@ -1,13 +1,12 @@
 import io
-from typing import Any, TYPE_CHECKING
+from typing import Any, Union, TYPE_CHECKING
 import sys
 
 
-if sys.version_info <= (3, 9):
-    if TYPE_CHECKING:
-        from tempfile import SpooledTemporaryFile
+if sys.version_info <= (3, 10):
+    from tempfile import SpooledTemporaryFile
 
-    ChildType = Union[io.IOBase, "SpooledTemporaryFile"]
+    ChildType = Union[io.IOBase, SpooledTemporaryFile[bytes]]
 else:
     ChildType = io.IOBase
 
