@@ -23,7 +23,7 @@ router = APIRouter()
 )
 async def subscribe(
     request: Request, authorization: Annotated[Optional[str], Header()] = None
-):
+) -> Response:
     """Subscribes the given URL to the given pattern. The body should be
     formatted as the following sequence:
 
@@ -116,7 +116,7 @@ async def subscribe(
         return Response(status_code=409)
     elif db_result == "unavailable":
         return Response(status_code=503)
-    elif db_result != "ok":
+    elif db_result != "success":
         return Response(status_code=500)
 
     return Response(status_code=202)

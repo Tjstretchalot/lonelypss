@@ -23,7 +23,7 @@ router = APIRouter()
 )
 async def unsubscribe(
     request: Request, authorization: Annotated[Optional[str], Header()] = None
-):
+) -> Response:
     """Unsubscribes the given URL from the given pattern. The body should be
     formatted as the following sequence:
 
@@ -108,11 +108,11 @@ async def unsubscribe(
     else:
         raise AssertionError("unreachable")
 
-    if db_result == "conflict":
+    if db_result == "not_found":
         return Response(status_code=409)
     elif db_result == "unavailable":
         return Response(status_code=503)
-    elif db_result != "ok":
+    elif db_result != "success":
         return Response(status_code=500)
 
     return Response(status_code=200)

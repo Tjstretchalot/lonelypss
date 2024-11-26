@@ -159,7 +159,8 @@ WHERE
         cursor = self.connection.cursor()
         try:
             cursor.execute(
-                "SELECT url FROM httppubsub_subscription_exacts WHERE exact = ?"
+                "SELECT url FROM httppubsub_subscription_exacts WHERE exact = ?",
+                (topic,),
             )
             while True:
                 row = cursor.fetchone()
@@ -168,7 +169,7 @@ WHERE
                 yield SubscriberInfoExact(type="exact", url=row[0])
 
             cursor.execute(
-                "SELECT glob, url FROM httppubsub_subscription_globs WHERE glob GLOB ?",
+                "SELECT glob, url FROM httppubsub_subscription_globs WHERE ? GLOB glob",
                 (topic,),
             )
             while True:

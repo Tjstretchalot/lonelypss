@@ -27,4 +27,4 @@ jobs:
       - name: Type check httppubsubserver with mypy
         working-directory: src
         run: |
-          mypy httppubsubserver --explicit-package-bases
+          mypy httppubsubserver --explicit-package-bases --disallow-untyped-defs

@@ -33,7 +33,7 @@ router = APIRouter()
 )
 async def notify(
     request: Request, authorization: Annotated[Optional[str], Header()] = None
-):
+) -> Response:
     """Sends the given message to subscribers for the given topic. The body should be
     formatted as the following sequence:
 

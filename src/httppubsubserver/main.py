@@ -5,7 +5,7 @@ import secrets
 from typing import Literal, Optional, Set
 
 
-def main():
+def main() -> None:
     parser = ArgumentParser()
     parser.add_argument(
         "--setup",
@@ -58,7 +58,7 @@ def setup_locally(
     incoming_auth_token: Optional[str],
     outgoing_auth: Literal["hmac", "token", "none"],
     outgoing_auth_token: Optional[str],
-):
+) -> None:
     print(
         "httppubserver - Setup\n"
         f"  - db: {db}\n"
@@ -85,40 +85,39 @@ def setup_locally(
     if outgoing_auth_token is None:
         outgoing_auth_token = secrets.token_urlsafe(64)
 
-    if incoming_auth != "none" or outgoing_auth != "none":
-        to_dump = (
-            json.dumps(
-                {
-                    "version": "1",
-                    **(
-                        {
-                            "incoming": {
-                                "type": incoming_auth,
-                                "secret": incoming_auth_token,
-                            }
+    to_dump = (
+        json.dumps(
+            {
+                "version": "1",
+                **(
+                    {
+                        "incoming": {
+                            "type": incoming_auth,
+                            "secret": incoming_auth_token,
                         }
-                        if incoming_auth != "none"
-                        else {}
-                    ),
-                    **(
-                        {
-                            "outgoing": {
-                                "type": outgoing_auth,
-                                "secret": outgoing_auth_token,
-                            }
+                    }
+                    if incoming_auth != "none"
+                    else {}
+                ),
+                **(
+                    {
+                        "outgoing": {
+                            "type": outgoing_auth,
+                            "secret": outgoing_auth_token,
                         }
-                        if outgoing_auth != "none"
-                        else {}
-                    ),
-                },
-                indent=2,
-            )
-            + "\n"
+                    }
+                    if outgoing_auth != "none"
+                    else {}
+                ),
+            },
+            indent=2,
         )
-        with open("broadcaster-secrets.json", "w") as f:
-            f.write(to_dump)
-        with open("subscriber-secrets.json", "w") as f:
-            f.write(to_dump)
+        + "\n"
+    )
+    with open("broadcaster-secrets.json", "w") as f:
+        f.write(to_dump)
+    with open("subscriber-secrets.json", "w") as f:
+        f.write(to_dump)
 
     print("Building entrypoint...")
 
@@ -164,6 +163,7 @@ def setup_locally(
 
         f.write(
             f"""from contextlib import asynccontextmanager
+from typing import AsyncIterator
 from fastapi import FastAPI
 import httppubsubserver.config.helpers.{db}_db_config as db_config
 import httppubsubserver.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
@@ -172,13 +172,14 @@ from httppubsubserver.middleware.config import ConfigMiddleware
 from httppubsubserver.config.lifespan import setup_config, teardown_config
 from httppubsubserver.config.auth_config import AuthConfigFromParts
 from httppubsubserver.config.config import (
+    Config,
     ConfigFromParts,
     GenericConfigFromValues,
 )
 from httppubsubserver.router import router as HttpPubSubRouter{import_json}
 
 
-def _make_config():{load_auth_secrets}
+def _make_config() -> Config:{load_auth_secrets}
     db = db_config.{db_code}
     incoming_auth = incoming_auth_config.{incoming_auth_code}
     outgoing_auth = outgoing_auth_config.{outgoing_auth_code}
@@ -200,13 +201,13 @@ config = _make_config()
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await setup_config(config)
     yield
     await teardown_config(config)
 
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(ConfigMiddleware, config=config)
 app.include_router(HttpPubSubRouter)
 app.router.redirect_slashes = False
