@@ -65,7 +65,8 @@ arbitrary bytes.
   patterns, but only if they pass the authorization step.
 - **patterns** cannot be longer than 2^16 - 1 (65535) bytes and must be valid utf-8.
   exact subscriptions are supported and cannot be longer than 2^16 - 1 (65535) bytes
-  and have no charset restrictions.
+  and have no charset restrictions. note that patterns will only match topics that
+  are valid utf-8, so foo/\* will not match `b"foo/stuff\xc3\x28"`
 - **messages** cannot be longer than 2^64 - 1 bytes (no charset restrictions), and
   will page to file by default at 10MB. It is not unusual for another part of the
   stack to restrict POST body sizes at a much smaller value, such as 50MB, by default.

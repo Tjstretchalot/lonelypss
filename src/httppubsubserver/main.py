@@ -158,6 +158,21 @@ def setup_locally(
             f'IncomingTokenAuth(\n        auth_secrets["incoming"]["secret"]\n    )'
         )
         need_secrets = True
+    elif incoming_auth == "hmac":
+        hmac_db = "TODO()"
+        if db == "sqlite":
+            hmac_db = (
+                "incoming_auth_config.IncomingHmacAuthSqliteDBConfig(\n"
+                '            "recent-hmac-tokens.db"\n'
+                "        )"
+            )
+        incoming_auth_code = (
+            "IncomingHmacAuth(\n"
+            '        auth_secrets["incoming"]["secret"],\n'
+            f"        db_config={hmac_db},\n"
+            "    )"
+        )
+        need_secrets = True
     elif incoming_auth == "none":
         incoming_auth_code = "IncomingNoneAuth()"
     else:
@@ -168,6 +183,10 @@ def setup_locally(
             f'OutgoingTokenAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
         )
         need_secrets = True
+    elif outgoing_auth == "hmac":
+        outgoing_auth_code = (
+            f'OutgoingHmacAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
+        )
     elif outgoing_auth == "none":
         outgoing_auth_code = "OutgoingNoneAuth()"
     else:
