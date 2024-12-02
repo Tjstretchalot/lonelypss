@@ -77,6 +77,37 @@ class IncomingAuthConfig(Protocol):
             `unavailable`: if a service is required to check this isn't available
         """
 
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        """Determines if the given message can be received from the given topic. As
+        we support very large messages, for authorization only the SHA-512 of
+        the message should be used, which will be fully verified. Note that broadcasters
+        only need to receive when using websocket connections, and the broadcaster is
+        receiving from _other broadcasters_.
+
+        Args:
+            url (str): the url the broadcaster used to reach us
+            topic (bytes): the topic the message claims to be on
+            message_sha512 (bytes): the sha512 of the message being received
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+            authorization (str, None): the authorization header they provided
+
+        Returns:
+            `ok`: if the message is allowed
+            `unauthorized`: if the authorization header is required but not provided
+            `forbidden`: if the authorization header is provided but invalid
+            `unavailable`: if a service is required to check this isn't available.
+              the message will be dropped.
+        """
+
 
 class OutgoingAuthConfig(Protocol):
     async def setup_outgoing_auth(self) -> None:
@@ -157,6 +188,24 @@ class AuthConfigFromParts:
         authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.incoming.is_notify_allowed(
+            topic=topic,
+            message_sha512=message_sha512,
+            now=now,
+            authorization=authorization,
+        )
+
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.incoming.is_receive_allowed(
+            url=url,
             topic=topic,
             message_sha512=message_sha512,
             now=now,

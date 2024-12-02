@@ -16,31 +16,44 @@ class IncomingTokenAuth:
     HTTPS.
     """
 
-    def __init__(self, token: str) -> None:
-        self.expecting = f"Bearer {token}"
-        """The exact authorization header we accept"""
+    def __init__(self, /, *, subscriber_token: str, broadcaster_token: str) -> None:
+        self.subscriber_expecting = f"Bearer {subscriber_token}"
+        """The exact authorization header we accept from subscribers"""
+
+        self.broadcaster_expecting = f"Bearer {broadcaster_token}"
+        """The exact authorization header we accept from broadcasters"""
 
     async def setup_incoming_auth(self) -> None: ...
     async def teardown_incoming_auth(self) -> None: ...
 
     def _check_header(
-        self, authorization: Optional[str]
+        self, expecting: str, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden"]:
         if authorization is None:
             return "unauthorized"
-        if not hmac.compare_digest(authorization, self.expecting):
+        if not hmac.compare_digest(authorization, expecting):
             return "forbidden"
         return "ok"
+
+    def _check_subscriber_header(
+        self, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden"]:
+        return self._check_header(self.subscriber_expecting, authorization)
+
+    def _check_broadcaster_header(
+        self, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden"]:
+        return self._check_header(self.broadcaster_expecting, authorization)
 
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return self._check_header(authorization)
+        return self._check_subscriber_header(authorization)
 
     async def is_subscribe_glob_allowed(
         self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return self._check_header(authorization)
+        return self._check_subscriber_header(authorization)
 
     async def is_notify_allowed(
         self,
@@ -51,7 +64,19 @@ class IncomingTokenAuth:
         now: float,
         authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return self._check_header(authorization)
+        return self._check_subscriber_header(authorization)
+
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return self._check_broadcaster_header(authorization)
 
 
 class OutgoingTokenAuth:

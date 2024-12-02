@@ -1,8 +1,13 @@
+import asyncio
 from typing import (
     AsyncIterable,
+    Callable,
+    Dict,
+    List,
     Literal,
     Optional,
     Protocol,
+    Tuple,
     Type,
     TypedDict,
     Union,
@@ -10,6 +15,12 @@ from typing import (
 )
 
 from httppubsubserver.config.auth_config import AuthConfig
+import importlib
+
+try:
+    import zstandard
+except ImportError:
+    ...
 
 
 class SubscriberInfoExact(TypedDict):
@@ -152,6 +163,10 @@ class GenericConfig(Protocol):
     def outgoing_http_timeout_sock_connect(self) -> Optional[float]:
         """The timeout for a single socket connecting to the server before we give up in seconds"""
 
+    @property
+    def websocket_accept_timeout(self) -> Optional[float]:
+        """The timeout for accepting a websocket connection in seconds"""
+
 
 class GenericConfigFromValues:
     """Convenience class that allows you to create a GenericConfig protocol
@@ -164,15 +179,209 @@ class GenericConfigFromValues:
         outgoing_http_timeout_connect: Optional[float],
         outgoing_http_timeout_sock_read: Optional[float],
         outgoing_http_timeout_sock_connect: Optional[float],
+        websocket_accept_timeout: Optional[float],
     ):
         self.message_body_spool_size = message_body_spool_size
         self.outgoing_http_timeout_total = outgoing_http_timeout_total
         self.outgoing_http_timeout_connect = outgoing_http_timeout_connect
         self.outgoing_http_timeout_sock_read = outgoing_http_timeout_sock_read
         self.outgoing_http_timeout_sock_connect = outgoing_http_timeout_sock_connect
+        self.websocket_accept_timeout = websocket_accept_timeout
 
 
-class Config(AuthConfig, DBConfig, GenericConfig, Protocol):
+class CompressionConfig(Protocol):
+    """Configuration for compression over websockets"""
+
+    @property
+    def compression_allowed(self) -> bool:
+        """True to allow zstandard compression for websocket messages when supported
+        by the client, false to disable service-level compression entirely.
+        """
+
+    def get_compression_dictionary_by_id(
+        self, dictionary_id: int, /
+    ) -> Optional[bytes]:
+        """If a precomputed zstandard compression dictionary is available with the given
+        id, the bytes of the dictionary should be returned. If the dictionary is not
+        available, return None.
+
+        This is generally only useful if you are using short-lived websocket
+        connections where trained dictionaries won't kick in, or you want to go
+        through the effort of hand-building a dictionary for a specific
+        use-case.
+        """
+
+    @property
+    def outgoing_max_ws_message_size(self) -> Optional[int]:
+        """We will try not to send websocket messages over this size. If this is at least
+        64kb, then we will guarrantee we won't go over this value.
+
+        Generally, breaking websocket messages apart is redundant: the websocket protocol
+        already has a concept of frames which can be used to send messages in parts. Further,
+        it's almost certainly more performant to break messages at a lower level in the stack.
+
+        However, in practice, the default settings of most websocket servers and
+        clients will not accept arbitrarily large messages, and the entire
+        message is often kept in memory, so we break them up to avoid issues. Note that when
+        we break messages we will spool to disk as they come in.
+
+        A reasonable value is 16mb
+
+        Return None for no limit
+        """
+
+    @property
+    def allow_training(self) -> bool:
+        """True to allow training dictionaries in websockets, false to completely disable
+        that feature
+        """
+
+    @property
+    def compression_min_size(self) -> int:
+        """The smallest message size we will try to compress
+
+        A reasonable size is 128 bytes
+        """
+
+    @property
+    def compression_trained_max_size(self) -> int:
+        """The largest message size we will try to use a custom trained dictionary for; for
+        messages larger than this, we will not use a shared compression dictionary to reduce
+        overhead, as theres enough context within the message to generate its own dictionary,
+        and the relative overhead of including that dictionary will be low.
+
+        A reasonable value is 16kb
+        """
+
+    @property
+    def compression_training_low_watermark(self) -> int:
+        """How much data we get before we make the first pass at the custom compression dictionary
+
+        A reasonable value is 100kb
+        """
+
+    async def train_compression_dict_low_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        """Trains a compression dictionary using the samples whose combined size is at least the
+        `compression_training_low_watermark` size, then tells us what level compression to use
+
+        Typically, this is something like
+
+        ```python
+        import zstandard
+        import asyncio
+
+        async def train_compression_dict_low_watermark(samples: List[bytes]) -> zstandard.ZstdCompressionDict:
+            zdict = await asyncio.to_thread(
+                zstandard.train_dictionary,
+                16384,
+                samples
+            )
+            await asyncio.to_thread(zdict.precompute_compress, level=3)
+            return (zdict, 3)
+        ```
+        """
+
+    @property
+    def compression_training_high_watermark(self) -> int:
+        """After we reach the low watermark and coordinate a compression dictionary, we retain
+        those samples and wait until we reach this watermark to train the dictionary again.
+
+        The low watermark gets us to some level of compression reasonably quickly, and the high
+        watermark gets us to a more accurate dictionary once there's enough data to work with.
+
+        A reasonable value is 10mb
+        """
+
+    async def train_compression_dict_high_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        """Trains a compression dictionary using the samples whose combined size is at least the
+        `compression_training_high_watermark` size and tells us what compression level to use.
+
+        Typically, this is something like
+
+        ```python
+        import zstandard
+        import asyncio
+
+        async def train_compression_dict_low_watermark(samples: List[bytes]) -> zstandard.ZstdCompressionDict:
+            zdict = await asyncio.to_thread(
+                zstandard.train_dictionary,
+                65536,
+                samples
+            )
+            await asyncio.to_thread(zdict.precompute_compress, level=10)
+            return (zdict, 10)
+        ```
+        """
+
+    @property
+    def compression_retrain_interval_seconds(self) -> int:
+        """How long in seconds between rebuilding a compression dictionary for very long-lived
+        websocket connections.
+
+        Especially when there are timestamps within the message body, the compression dictionary
+        needs occasional refreshing to remain effective.
+
+        A reasonable value is 1 day
+        """
+
+
+class CompressionConfigFromParts:
+    """Convenience class that allows you to create a CompressionConfig protocol
+    satisfying object from values, using default implementations for the methods
+    """
+
+    def __init__(
+        self,
+        compression_allowed: bool,
+        compression_dictionary_by_id: Dict[int, bytes],
+        outgoing_max_ws_message_size: Optional[int],
+        allow_training: bool,
+        compression_min_size: int,
+        compression_trained_max_size: int,
+        compression_training_low_watermark: int,
+        compression_training_high_watermark: int,
+        compression_retrain_interval_seconds: int,
+    ):
+        if compression_allowed:
+            try:
+                importlib.import_module("zstandard")
+            except ImportError:
+                raise ValueError(
+                    "Compression is allowed, but zstandard is not available. "
+                    "Set compression_allowed=False to disable compression, or "
+                    "`pip install zstandard` to enable it."
+                )
+
+        self.compression_allowed = compression_allowed
+        self.get_compression_dictionary_by_id = compression_dictionary_by_id.get
+        self.outgoing_max_ws_message_size = outgoing_max_ws_message_size
+        self.allow_training = allow_training
+        self.compression_min_size = compression_min_size
+        self.compression_trained_max_size = compression_trained_max_size
+        self.compression_training_low_watermark = compression_training_low_watermark
+        self.compression_training_high_watermark = compression_training_high_watermark
+        self.compression_retrain_interval_seconds = compression_retrain_interval_seconds
+
+    async def train_compression_dict_low_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        zdict = await asyncio.to_thread(zstandard.train_dictionary, 16384, samples)
+        await asyncio.to_thread(zdict.precompute_compress, level=3)
+        return (zdict, 3)
+
+    async def train_compression_dict_high_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        zdict = await asyncio.to_thread(zstandard.train_dictionary, 65536, samples)
+        await asyncio.to_thread(zdict.precompute_compress, level=10)
+        return (zdict, 10)
+
+
+class Config(AuthConfig, DBConfig, GenericConfig, CompressionConfig, Protocol):
     """The injected behavior required for the httppubsubserver to operate. This is
     generally generated for you using one of the templates, see the readme for details
     """
@@ -181,10 +390,17 @@ class Config(AuthConfig, DBConfig, GenericConfig, Protocol):
 class ConfigFromParts:
     """Convenience class that combines the three parts of the config into a single object."""
 
-    def __init__(self, auth: AuthConfig, db: DBConfig, generic: GenericConfig):
+    def __init__(
+        self,
+        auth: AuthConfig,
+        db: DBConfig,
+        generic: GenericConfig,
+        compression: CompressionConfig,
+    ):
         self.auth = auth
         self.db = db
         self.generic = generic
+        self.compression = compression
 
     async def setup_incoming_auth(self) -> None:
         await self.auth.setup_incoming_auth()
@@ -228,6 +444,24 @@ class ConfigFromParts:
         authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.auth.is_notify_allowed(
+            topic=topic,
+            message_sha512=message_sha512,
+            now=now,
+            authorization=authorization,
+        )
+
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_receive_allowed(
+            url=url,
             topic=topic,
             message_sha512=message_sha512,
             now=now,
@@ -284,7 +518,59 @@ class ConfigFromParts:
     def outgoing_http_timeout_sock_connect(self) -> Optional[float]:
         return self.generic.outgoing_http_timeout_sock_connect
 
+    @property
+    def websocket_accept_timeout(self) -> Optional[float]:
+        return self.generic.websocket_accept_timeout
+
+    @property
+    def compression_allowed(self) -> bool:
+        return self.compression.compression_allowed
+
+    def get_compression_dictionary_by_id(
+        self, dictionary_id: int, /
+    ) -> Optional[bytes]:
+        return self.compression.get_compression_dictionary_by_id(dictionary_id)
+
+    @property
+    def outgoing_max_ws_message_size(self) -> Optional[int]:
+        return self.compression.outgoing_max_ws_message_size
+
+    @property
+    def allow_training(self) -> bool:
+        return self.compression.allow_training
+
+    @property
+    def compression_min_size(self) -> int:
+        return self.compression.compression_min_size
+
+    @property
+    def compression_trained_max_size(self) -> int:
+        return self.compression.compression_trained_max_size
+
+    @property
+    def compression_training_low_watermark(self) -> int:
+        return self.compression.compression_training_low_watermark
+
+    async def train_compression_dict_low_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        return await self.compression.train_compression_dict_low_watermark(samples)
+
+    @property
+    def compression_training_high_watermark(self) -> int:
+        return self.compression.compression_training_high_watermark
+
+    async def train_compression_dict_high_watermark(
+        self, /, samples: List[bytes]
+    ) -> "Tuple[zstandard.ZstdCompressionDict, int]":
+        return await self.compression.train_compression_dict_high_watermark(samples)
+
+    @property
+    def compression_retrain_interval_seconds(self) -> int:
+        return self.compression.compression_retrain_interval_seconds
+
 
 if TYPE_CHECKING:
     __: Type[GenericConfig] = GenericConfigFromValues
-    ___: Type[Config] = ConfigFromParts
+    ___: Type[CompressionConfig] = CompressionConfigFromParts
+    ____: Type[Config] = ConfigFromParts

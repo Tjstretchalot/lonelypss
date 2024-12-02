@@ -155,7 +155,10 @@ def setup_locally(
     need_secrets = False
     if incoming_auth == "token":
         incoming_auth_code = (
-            f'IncomingTokenAuth(\n        auth_secrets["incoming"]["secret"]\n    )'
+            "IncomingTokenAuth(\n"
+            '        subscriber_token=auth_secrets["incoming"]["secret"],\n'
+            '        broadcaster_token=auth_secrets["outgoing"]["secret"],\n'
+            "    )"
         )
         need_secrets = True
     elif incoming_auth == "hmac":
@@ -168,7 +171,8 @@ def setup_locally(
             )
         incoming_auth_code = (
             "IncomingHmacAuth(\n"
-            '        auth_secrets["incoming"]["secret"],\n'
+            '        subscriber_secret=auth_secrets["incoming"]["secret"],\n'
+            '        broadcaster_secret=auth_secrets["outgoing"]["secret"],\n'
             f"        db_config={hmac_db},\n"
             "    )"
         )

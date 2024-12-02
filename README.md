@@ -89,7 +89,7 @@ https://www.uvicorn.org/deployment/#running-with-https
 python -m venv venv
 source venv/bin/activate
 python -m pip install -U pip
-pip install httppubsubserver
+pip install httppubsubserver[standard]
 
 httppubsubserver --setup --db sqlite --incoming-auth hmac --outgoing-auth hmac
 pip install -r requirements.txt

@@ -25,3 +25,16 @@ dependencies = [
 
 [project.scripts]
 httppubsubserver = "httppubsubserver.main:main"
+
+[project.optional-dependencies]
+standard = [
+    "uvicorn>=0.32",
+    "colorama>=0.4;sys_platform == 'win32'",
+    "httptools>=0.6.3",
+    "python-dotenv>=0.13",
+    "PyYAML>=5.1",
+    "uvloop>=0.14.0,!=0.15.0,!=0.15.1; sys_platform != 'win32' and (sys_platform != 'cygwin' and platform_python_implementation != 'PyPy')",
+    "watchfiles>=0.13",
+    "websockets>=10.4",
+    "zstandard>=0.23"
+]

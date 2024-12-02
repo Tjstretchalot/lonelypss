@@ -39,6 +39,18 @@ class IncomingNoneAuth:
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return "ok"
 
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return "ok"
+
 
 class OutgoingNoneAuth:
     """Doesn't set any authorization header. In order for this to be secure, the

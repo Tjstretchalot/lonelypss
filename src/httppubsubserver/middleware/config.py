@@ -1,4 +1,4 @@
-from fastapi import Request
+from fastapi.requests import HTTPConnection
 from starlette.types import ASGIApp, Scope, Receive, Send
 
 from httppubsubserver.config.config import Config
@@ -18,11 +18,11 @@ class ConfigMiddleware:
         await self.app(scope, receive, send)
 
 
-def get_config_from_request(request: Request) -> Config:
+def get_config_from_request(request: HTTPConnection) -> Config:
     """Retrieves the `httppubsubserver_config` from the request scope. This is only
     available if the `ConfigMiddleware` is being used
     """
     try:
         return request.scope["httppubsubserver_config"]
     except KeyError:
-        raise Exception("ConfigMiddleware not injected into request scope")
+        raise Exception("ConfigMiddleware not injecting into request scope")

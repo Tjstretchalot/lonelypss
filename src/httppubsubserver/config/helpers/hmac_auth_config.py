@@ -193,14 +193,22 @@ class IncomingHmacAuth:
 
     def __init__(
         self,
-        secret: str,
         *,
+        subscriber_secret: str,
+        broadcaster_secret: str,
         token_lifetime: float = 120,
         db_config: IncomingHmacAuthDBConfig,
     ) -> None:
-        self.secret = base64.urlsafe_b64decode(secret + "==")
-        """The shared secret used to generate the HMAC tokens"""
-        assert len(self.secret) == 64, "secret must be 64 bytes long"
+        self.subscriber_secret = base64.urlsafe_b64decode(subscriber_secret + "==")
+        """The shared secret used to generate the HMAC tokens for requests coming from subscribers"""
+        assert (
+            len(self.subscriber_secret) == 64
+        ), "subscriber_secret must be 64 bytes long"
+        self.broadcaster_secret = base64.urlsafe_b64decode(broadcaster_secret + "==")
+        """The shared secret used to generate the HMAC tokens for requests coming from broadcasters"""
+        assert (
+            len(self.broadcaster_secret) == 64
+        ), "broadcaster_secret must be 64 bytes long"
         self.token_lifetime = token_lifetime
         """How long after a token is created that we still accept it"""
         self.db_config = db_config
@@ -256,9 +264,9 @@ class IncomingHmacAuth:
         return "found", (timestamp, nonce, hmac_token)
 
     async def _check_token(
-        self, to_sign: bytes, hmac_token: bytes
+        self, secret: bytes, to_sign: bytes, hmac_token: bytes
     ) -> Literal["ok", "forbidden"]:
-        expected_hmac = hmac.new(self.secret, to_sign, "sha512").digest()
+        expected_hmac = hmac.new(secret, to_sign, "sha512").digest()
         if not hmac.compare_digest(hmac_token, expected_hmac):
             return "forbidden"
 
@@ -266,6 +274,16 @@ class IncomingHmacAuth:
             return "forbidden"
 
         return "ok"
+
+    async def _check_subscriber_token(
+        self, to_sign: bytes, hmac_token: bytes
+    ) -> Literal["ok", "forbidden"]:
+        return await self._check_token(self.subscriber_secret, to_sign, hmac_token)
+
+    async def _check_broadcaster_token(
+        self, to_sign: bytes, hmac_token: bytes
+    ) -> Literal["ok", "forbidden"]:
+        return await self._check_token(self.broadcaster_secret, to_sign, hmac_token)
 
     async def is_subscribe_exact_allowed(
         self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
@@ -290,7 +308,7 @@ class IncomingHmacAuth:
                 exact,
             ]
         )
-        return await self._check_token(to_sign, hmac_token)
+        return await self._check_subscriber_token(to_sign, hmac_token)
 
     async def is_subscribe_glob_allowed(
         self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
@@ -316,7 +334,7 @@ class IncomingHmacAuth:
                 encoded_glob,
             ]
         )
-        return await self._check_token(to_sign, hmac_token)
+        return await self._check_subscriber_token(to_sign, hmac_token)
 
     async def is_notify_allowed(
         self,
@@ -346,7 +364,40 @@ class IncomingHmacAuth:
                 message_sha512,
             ]
         )
-        return await self._check_token(to_sign, hmac_token)
+        return await self._check_subscriber_token(to_sign, hmac_token)
+
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        assert len(message_sha512) == 64, "message_sha512 must be 64 bytes long"
+        result = self._get_token(authorization, now)
+        if result[0] != "found":
+            return result[0]
+
+        timestamp, nonce, hmac_token = result[1]
+        encoded_url = url.encode("utf-8")
+        encoded_timestamp = timestamp.to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(encoded_url).to_bytes(2, "big"),
+                encoded_url,
+                len(topic).to_bytes(2, "big"),
+                topic,
+                message_sha512,
+            ]
+        )
+        return await self._check_broadcaster_token(to_sign, hmac_token)
 
 
 class OutgoingHmacAuth:
