@@ -167,6 +167,23 @@ class GenericConfig(Protocol):
     def websocket_accept_timeout(self) -> Optional[float]:
         """The timeout for accepting a websocket connection in seconds"""
 
+    @property
+    def websocket_max_pending_sends(self) -> Optional[int]:
+        """The maximum number of pending sends (not yet sent to the ASGI server) before we
+        disconnect the websocket forcibly. This mainly protects against (accidental) tarpitting
+        when the subscriber cannot keep up
+        """
+
+    @property
+    def websocket_large_direct_send_timeout(self) -> Optional[float]:
+        """How long we are willing to wait for a websocket.send to complete while holding
+        an exclusive file handle to the message being sent before copying the remainder of
+        the message to memory and progressing the other sends. This value is in seconds,
+        and a reasonable choice is 0.3 (300ms)
+
+        A value of 0 means it must complete within one event loop
+        """
+
 
 class GenericConfigFromValues:
     """Convenience class that allows you to create a GenericConfig protocol
@@ -180,6 +197,8 @@ class GenericConfigFromValues:
         outgoing_http_timeout_sock_read: Optional[float],
         outgoing_http_timeout_sock_connect: Optional[float],
         websocket_accept_timeout: Optional[float],
+        websocket_max_pending_sends: Optional[int],
+        websocket_large_direct_send_timeout: Optional[float],
     ):
         self.message_body_spool_size = message_body_spool_size
         self.outgoing_http_timeout_total = outgoing_http_timeout_total
@@ -187,6 +206,8 @@ class GenericConfigFromValues:
         self.outgoing_http_timeout_sock_read = outgoing_http_timeout_sock_read
         self.outgoing_http_timeout_sock_connect = outgoing_http_timeout_sock_connect
         self.websocket_accept_timeout = websocket_accept_timeout
+        self.websocket_max_pending_sends = websocket_max_pending_sends
+        self.websocket_large_direct_send_timeout = websocket_large_direct_send_timeout
 
 
 class CompressionConfig(Protocol):
@@ -198,17 +219,19 @@ class CompressionConfig(Protocol):
         by the client, false to disable service-level compression entirely.
         """
 
-    def get_compression_dictionary_by_id(
+    async def get_compression_dictionary_by_id(
         self, dictionary_id: int, /
-    ) -> Optional[bytes]:
-        """If a precomputed zstandard compression dictionary is available with the given
-        id, the bytes of the dictionary should be returned. If the dictionary is not
-        available, return None.
+    ) -> "Optional[Tuple[zstandard.ZstdCompressionDict, int]]":
+        """If a precomputed zstandard compression dictionary is available with the
+        given id, the bytes of the dictionary and the compression level to use
+        should be returned. If the dictionary is not available, return None.
 
         This is generally only useful if you are using short-lived websocket
         connections where trained dictionaries won't kick in, or you want to go
         through the effort of hand-building a dictionary for a specific
         use-case.
+
+        The returned dict should have its data precomputed as if by `precompute_compress`
         """
 
     @property
@@ -337,7 +360,7 @@ class CompressionConfigFromParts:
     def __init__(
         self,
         compression_allowed: bool,
-        compression_dictionary_by_id: Dict[int, bytes],
+        compression_dictionary_by_id: "Dict[int, Tuple[zstandard.ZstdCompressionDict, int]]",
         outgoing_max_ws_message_size: Optional[int],
         allow_training: bool,
         compression_min_size: int,
@@ -356,8 +379,16 @@ class CompressionConfigFromParts:
                     "`pip install zstandard` to enable it."
                 )
 
+        if 0 in compression_dictionary_by_id:
+            raise ValueError("Dictionary ID 0 is reserved for no compression")
+
+        if 1 in compression_dictionary_by_id:
+            raise ValueError(
+                "Dictionary ID 1 is reserved for not using a compression dictionary"
+            )
+
         self.compression_allowed = compression_allowed
-        self.get_compression_dictionary_by_id = compression_dictionary_by_id.get
+        self.compression_dictionary_by_id = compression_dictionary_by_id
         self.outgoing_max_ws_message_size = outgoing_max_ws_message_size
         self.allow_training = allow_training
         self.compression_min_size = compression_min_size
@@ -365,6 +396,11 @@ class CompressionConfigFromParts:
         self.compression_training_low_watermark = compression_training_low_watermark
         self.compression_training_high_watermark = compression_training_high_watermark
         self.compression_retrain_interval_seconds = compression_retrain_interval_seconds
+
+    async def get_compression_dictionary_by_id(
+        self, dictionary_id: int, /
+    ) -> "Optional[Tuple[zstandard.ZstdCompressionDict, int]]":
+        return self.compression_dictionary_by_id.get(dictionary_id)
 
     async def train_compression_dict_low_watermark(
         self, /, samples: List[bytes]
@@ -523,13 +559,21 @@ class ConfigFromParts:
         return self.generic.websocket_accept_timeout
 
     @property
+    def websocket_max_pending_sends(self) -> Optional[int]:
+        return self.generic.websocket_max_pending_sends
+
+    @property
+    def websocket_large_direct_send_timeout(self) -> Optional[float]:
+        return self.generic.websocket_large_direct_send_timeout
+
+    @property
     def compression_allowed(self) -> bool:
         return self.compression.compression_allowed
 
-    def get_compression_dictionary_by_id(
+    async def get_compression_dictionary_by_id(
         self, dictionary_id: int, /
-    ) -> Optional[bytes]:
-        return self.compression.get_compression_dictionary_by_id(dictionary_id)
+    ) -> "Optional[Tuple[zstandard.ZstdCompressionDict, int]]":
+        return await self.compression.get_compression_dictionary_by_id(dictionary_id)
 
     @property
     def outgoing_max_ws_message_size(self) -> Optional[int]:

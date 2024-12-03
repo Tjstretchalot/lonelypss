@@ -129,6 +129,20 @@ class OutgoingAuthConfig(Protocol):
         contacting the given url about a message with the given sha512 on the
         given topic at approximately the given time.
 
+        When using websockets, the url is of the form "websocket:<nonce>:<ctr>",
+        where more details are described in the websocket endpoints
+        documentation. What's important is that the recipient can either verify
+        the url is what they expect or the url is structured such that it is
+        unique if _either_ party is acting correctly, meaning replay attacks are
+        limited to a single target (i.e., we structurally disallow replaying a
+        message sent from Bob to Alice via pretending to be Bob to Charlie, as
+        Charlie will be able to tell that message was intended for not-Charlie).
+
+        Note that the reverse is not promised (i.e., broadcasters do not know which
+        broadcaster the subscriber meant to contact), but assuming the number of
+        broadcasters is much smaller than the number of subscribers, this is less
+        of an issue to coordinate.
+
         Args:
             url (str): the url that will receive the notification
             topic (bytes): the topic that the message is being sent to
