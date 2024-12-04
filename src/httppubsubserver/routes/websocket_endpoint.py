@@ -33,7 +33,11 @@ from httppubsubserver.util.websocket_message import (
 import asyncio
 
 from httppubsubserver.util.ws_receiver import BaseWSReceiver, FanoutWSReceiver
-from httppubsubserver.util.sync_io import SyncReadableBytesIO, SyncIOBaseLikeIO
+from httppubsubserver.util.sync_io import (
+    SyncReadableBytesIO,
+    SyncIOBaseLikeIO,
+    read_exact,
+)
 
 try:
     import zstandard
@@ -77,13 +81,6 @@ class _ParsedWSMessage:
     body: bytes
 
 
-def _exact_read(stream: SyncReadableBytesIO, n: int) -> bytes:
-    data = stream.read(n)
-    if len(data) != n:
-        raise ValueError("Stream ended unexpectedly")
-    return data
-
-
 _STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
     _ParsedWSMessageType.CONFIGURE: [],
     _ParsedWSMessageType.SUBSCRIBE: ["authorization"],
@@ -94,21 +91,21 @@ _STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
 
 def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
     stream = io.BytesIO(body)
-    flags = _ParsedWSMessageFlags(int.from_bytes(_exact_read(stream, 2), "big"))
-    message_type = _ParsedWSMessageType(int.from_bytes(_exact_read(stream, 2), "big"))
+    flags = _ParsedWSMessageFlags(int.from_bytes(read_exact(stream, 2), "big"))
+    message_type = _ParsedWSMessageType(int.from_bytes(read_exact(stream, 2), "big"))
 
     headers: Dict[str, bytes] = {}
     if flags & _ParsedWSMessageFlags.MINIMAL_HEADERS:
         if message_type in _STANDARD_MINIMAL_HEADERS_BY_TYPE:
             minimal_headers = _STANDARD_MINIMAL_HEADERS_BY_TYPE[message_type]
         if message_type == _ParsedWSMessageType.NOTIFY_STREAM:
-            length = int.from_bytes(_exact_read(stream, 2), "big")
-            headers["authorization"] = _exact_read(stream, length)
+            length = int.from_bytes(read_exact(stream, 2), "big")
+            headers["authorization"] = read_exact(stream, length)
 
-            length = int.from_bytes(_exact_read(stream, 2), "big")
+            length = int.from_bytes(read_exact(stream, 2), "big")
             if length > 8:
                 raise ValueError("part id max 8 bytes")
-            part_id_bytes = _exact_read(stream, length)
+            part_id_bytes = read_exact(stream, length)
             headers["x-part-id"] = part_id_bytes
 
             part_id = int.from_bytes(part_id_bytes, "big")
@@ -125,16 +122,16 @@ def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
                 minimal_headers = ["x-identifier"]
 
         for header in minimal_headers:
-            length = int.from_bytes(_exact_read(stream, 2), "big")
-            headers[header] = _exact_read(stream, length)
+            length = int.from_bytes(read_exact(stream, 2), "big")
+            headers[header] = read_exact(stream, length)
     else:
-        num_headers = int.from_bytes(_exact_read(stream, 2), "big")
+        num_headers = int.from_bytes(read_exact(stream, 2), "big")
         for _ in range(num_headers):
-            name_length = int.from_bytes(_exact_read(stream, 2), "big")
-            name_enc = _exact_read(stream, name_length)
+            name_length = int.from_bytes(read_exact(stream, 2), "big")
+            name_enc = read_exact(stream, name_length)
             name = name_enc.decode("ascii").lower()
-            value_length = int.from_bytes(_exact_read(stream, 2), "big")
-            value = _exact_read(stream, value_length)
+            value_length = int.from_bytes(read_exact(stream, 2), "big")
+            value = read_exact(stream, value_length)
             headers[name] = value
 
     return _ParsedWSMessage(flags, message_type, headers, stream.read())
@@ -572,8 +569,11 @@ async def _check_training_data(state: _StateOpen) -> _State:
                 length_bytes = state.training_data.collector.tmpfile.read(4)
                 if not length_bytes:
                     break
+                assert len(length_bytes) == 4
                 length = int.from_bytes(length_bytes, "big")
-                samples.append(state.training_data.collector.tmpfile.read(length))
+                samples.append(
+                    read_exact(state.training_data.collector.tmpfile, length)
+                )
 
             dictionary_id = state.custom_compression_dict_counter
             state.custom_compression_dict_counter += 1
@@ -613,8 +613,11 @@ async def _check_training_data(state: _StateOpen) -> _State:
                 length_bytes = state.training_data.collector.tmpfile.read(4)
                 if not length_bytes:
                     break
+                assert len(length_bytes) == 4
                 length = int.from_bytes(length_bytes, "big")
-                samples.append(state.training_data.collector.tmpfile.read(length))
+                samples.append(
+                    read_exact(state.training_data.collector.tmpfile, length)
+                )
 
             dictionary_id = state.custom_compression_dict_counter
             state.custom_compression_dict_counter += 1
@@ -1198,9 +1201,9 @@ async def _handle_open(state: _State) -> _State:
                         state, ValueError("configuration already set")
                     )
                 rdr = io.BytesIO(parsed_message.body)
-                subscriber_nonce = _exact_read(rdr, 32)
-                flags = _ConfigurationFlags(int.from_bytes(_exact_read(rdr, 4), "big"))
-                dictionary_id = int.from_bytes(_exact_read(rdr, 2), "big")
+                subscriber_nonce = read_exact(rdr, 32)
+                flags = _ConfigurationFlags(int.from_bytes(read_exact(rdr, 4), "big"))
+                dictionary_id = int.from_bytes(read_exact(rdr, 2), "big")
 
                 broadcaster_nonce = secrets.token_bytes(32)
                 connection_nonce = hashlib.sha256(

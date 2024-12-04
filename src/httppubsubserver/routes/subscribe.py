@@ -1,12 +1,64 @@
+from enum import Enum, auto
 import time
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional, Union
 from fastapi import APIRouter, Header, Request, Response
 import io
-
+from dataclasses import dataclass
 from httppubsubserver.middleware.config import get_config_from_request
+from httppubsubserver.util.sync_io import SyncReadableBytesIO, read_exact
 
 
 router = APIRouter()
+
+
+class SubscribeType(Enum):
+    EXACT = auto()
+    GLOB = auto()
+
+
+@dataclass
+class SubscribePayloadExact:
+    type: Literal[SubscribeType.EXACT]
+    url: str
+    topic: bytes
+
+
+@dataclass
+class SubscribePayloadGlob:
+    type: Literal[SubscribeType.GLOB]
+    url: str
+    glob: str
+
+
+SubscribePayload = Union[SubscribePayloadExact, SubscribePayloadGlob]
+
+
+def parse_subscribe_payload(body: SyncReadableBytesIO) -> SubscribePayload:
+    """Parses the body intended for the /v1/subscribe endpoint. Raises
+    ValueError if the body is malformed.
+
+    The body is expected to be buffered as this may make many small reads
+    """
+    url_len = int.from_bytes(read_exact(body, 2), "big", signed=False)
+    url_bytes = read_exact(body, url_len)
+    url = url_bytes.decode("utf-8", errors="strict")
+
+    match_type = int.from_bytes(read_exact(body, 1), "big", signed=False)
+    if match_type not in (0, 1):
+        raise ValueError(f"unknown match type (0 or 1 expected, got {match_type})")
+
+    is_exact = match_type == 0
+
+    pattern_len = int.from_bytes(read_exact(body, 2), "big", signed=False)
+    pattern_bytes = read_exact(body, pattern_len)
+
+    if is_exact:
+        return SubscribePayloadExact(
+            type=SubscribeType.EXACT, url=url, topic=pattern_bytes
+        )
+
+    glob = pattern_bytes.decode("utf-8")
+    return SubscribePayloadGlob(type=SubscribeType.GLOB, url=url, glob=glob)
 
 
 @router.post(
@@ -56,45 +108,20 @@ async def subscribe(
     if len(body) < 5 or len(body) > 2 + 65535 + 1 + 2 + 65535:
         return Response(status_code=400)
 
-    body_io = io.BytesIO(body)
-    url_len = int.from_bytes(body_io.read(2), "big", signed=False)
-    url_bytes = body_io.read(url_len)
-
     try:
-        url = url_bytes.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
+        parsed = parse_subscribe_payload(io.BytesIO(body))
+    except ValueError:
         return Response(status_code=400)
-
-    match_type = int.from_bytes(body_io.read(1), "big", signed=False)
-    if match_type not in (0, 1):
-        return Response(status_code=400)
-
-    is_exact = match_type == 0
-
-    pattern_len = int.from_bytes(body_io.read(2), "big", signed=False)
-    pattern_bytes = body_io.read(pattern_len)
-
-    if is_exact:
-        pattern = None
-        exact = pattern_bytes
-    else:
-        try:
-            pattern = pattern_bytes.decode("utf-8", errors="strict")
-            exact = None
-        except:
-            return Response(status_code=400)
 
     auth_at = time.time()
-    if exact is not None:
+    if parsed.type == SubscribeType.EXACT:
         auth_result = await config.is_subscribe_exact_allowed(
-            url=url, exact=exact, now=auth_at, authorization=authorization
-        )
-    elif pattern is not None:
-        auth_result = await config.is_subscribe_glob_allowed(
-            url=url, glob=pattern, now=auth_at, authorization=authorization
+            url=parsed.url, exact=parsed.topic, now=auth_at, authorization=authorization
         )
     else:
-        raise AssertionError("unreachable")
+        auth_result = await config.is_subscribe_glob_allowed(
+            url=parsed.url, glob=parsed.glob, now=auth_at, authorization=authorization
+        )
 
     if auth_result == "unauthorized":
         return Response(status_code=401)
@@ -105,12 +132,10 @@ async def subscribe(
     elif auth_result != "ok":
         return Response(status_code=500)
 
-    if exact is not None:
-        db_result = await config.subscribe_exact(url=url, exact=exact)
-    elif pattern is not None:
-        db_result = await config.subscribe_glob(url=url, glob=pattern)
+    if parsed.type == SubscribeType.EXACT:
+        db_result = await config.subscribe_exact(url=parsed.url, exact=parsed.topic)
     else:
-        raise AssertionError("unreachable")
+        db_result = await config.subscribe_glob(url=parsed.url, glob=parsed.glob)
 
     if db_result == "conflict":
         return Response(status_code=409)

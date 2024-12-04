@@ -29,6 +29,14 @@ class SyncWritableBytesIO(Protocol):
 SyncReadableBytesIO = Union[SyncReadableBytesIOA, SyncReadableBytesIOB]
 
 
+def read_exact(stream: SyncReadableBytesIO, n: int) -> bytes:
+    """Reads exactly n bytes from the stream, otherwise raises ValueError"""
+    result = stream.read(n)
+    if len(result) != n:
+        raise ValueError(f"expected {n} bytes, got {len(result)}")
+    return result
+
+
 class Closeable(Protocol):
     """Represents something that can be closed"""
 

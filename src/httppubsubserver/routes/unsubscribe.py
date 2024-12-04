@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, Request, Response
 import io
 
 from httppubsubserver.middleware.config import get_config_from_request
+from httppubsubserver.routes.subscribe import SubscribeType, parse_subscribe_payload
 
 
 router = APIRouter()
@@ -52,45 +53,20 @@ async def unsubscribe(
     if len(body) < 5 or len(body) > 2 + 65535 + 1 + 2 + 65535:
         return Response(status_code=400)
 
-    body_io = io.BytesIO(body)
-    url_len = int.from_bytes(body_io.read(2), "big", signed=False)
-    url_bytes = body_io.read(url_len)
-
     try:
-        url = url_bytes.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
+        parsed = parse_subscribe_payload(io.BytesIO(body))
+    except ValueError:
         return Response(status_code=400)
-
-    match_type = int.from_bytes(body_io.read(1), "big", signed=False)
-    if match_type not in (0, 1):
-        return Response(status_code=400)
-
-    is_exact = match_type == 0
-
-    pattern_len = int.from_bytes(body_io.read(2), "big", signed=False)
-    pattern_bytes = body_io.read(pattern_len)
-
-    if is_exact:
-        pattern = None
-        exact = pattern_bytes
-    else:
-        try:
-            pattern = pattern_bytes.decode("utf-8", errors="strict")
-            exact = None
-        except:
-            return Response(status_code=400)
 
     auth_at = time.time()
-    if exact is not None:
+    if parsed.type == SubscribeType.EXACT:
         auth_result = await config.is_subscribe_exact_allowed(
-            url=url, exact=exact, now=auth_at, authorization=authorization
-        )
-    elif pattern is not None:
-        auth_result = await config.is_subscribe_glob_allowed(
-            url=url, glob=pattern, now=auth_at, authorization=authorization
+            url=parsed.url, exact=parsed.topic, now=auth_at, authorization=authorization
         )
     else:
-        raise AssertionError("unreachable")
+        auth_result = await config.is_subscribe_glob_allowed(
+            url=parsed.url, glob=parsed.glob, now=auth_at, authorization=authorization
+        )
 
     if auth_result == "unauthorized":
         return Response(status_code=401)
@@ -101,12 +77,10 @@ async def unsubscribe(
     elif auth_result != "ok":
         return Response(status_code=500)
 
-    if exact is not None:
-        db_result = await config.unsubscribe_exact(url=url, exact=exact)
-    elif pattern is not None:
-        db_result = await config.unsubscribe_glob(url=url, glob=pattern)
+    if parsed.type == SubscribeType.EXACT:
+        db_result = await config.unsubscribe_exact(url=parsed.url, exact=parsed.topic)
     else:
-        raise AssertionError("unreachable")
+        db_result = await config.unsubscribe_glob(url=parsed.url, glob=parsed.glob)
 
     if db_result == "not_found":
         return Response(status_code=409)
