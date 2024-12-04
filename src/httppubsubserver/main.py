@@ -222,6 +222,7 @@ from httppubsubserver.config.config import (
     Config,
     ConfigFromParts,
     GenericConfigFromValues,
+    CompressionConfigFromParts,
 )
 from httppubsubserver.router import router as HttpPubSubRouter{import_json}
 
@@ -240,6 +241,21 @@ def _make_config() -> Config:{load_auth_secrets}
             outgoing_http_timeout_connect=None,
             outgoing_http_timeout_sock_read=5,
             outgoing_http_timeout_sock_connect=5,
+            websocket_accept_timeout=2,
+            websocket_max_pending_sends=255,
+            websocket_large_direct_send_timeout=0.3,
+        ),
+        compression=CompressionConfigFromParts(
+            compression_allowed=True,
+            compression_dictionary_by_id=dict(),
+            outgoing_max_ws_message_size=16 * 1024 * 1024,
+            allow_training=True,
+            compression_min_size=32,
+            compression_trained_max_size=16 * 1024,
+            compression_training_low_watermark=100 * 1024,
+            compression_training_high_watermark=10 * 1024 * 1024,
+            compression_retrain_interval_seconds=60 * 60 * 60,
+            decompression_max_window_size=8 * 1024 * 1024
         ),
     )
 

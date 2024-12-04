@@ -1,14 +1,15 @@
 import io
 from typing import Any, Union, TYPE_CHECKING
 import sys
+from httppubsubserver.util.sync_io import SyncIOBaseLikeIO
 
 
 if sys.version_info <= (3, 10):
     from tempfile import SpooledTemporaryFile
 
-    ChildType = Union[io.IOBase, SpooledTemporaryFile[bytes]]
+    ChildType = Union[io.IOBase, SpooledTemporaryFile[bytes], SyncIOBaseLikeIO]
 else:
-    ChildType = io.IOBase
+    ChildType = Union[io.IOBase, SyncIOBaseLikeIO]
 
 
 def _noop(*args: Any, **kwargs: Any) -> None:

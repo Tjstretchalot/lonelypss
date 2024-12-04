@@ -1,7 +1,6 @@
 import asyncio
 from typing import (
     AsyncIterable,
-    Callable,
     Dict,
     List,
     Literal,
@@ -263,7 +262,7 @@ class CompressionConfig(Protocol):
     def compression_min_size(self) -> int:
         """The smallest message size we will try to compress
 
-        A reasonable size is 128 bytes
+        A reasonable size is 32 bytes
         """
 
     @property
@@ -351,6 +350,30 @@ class CompressionConfig(Protocol):
         A reasonable value is 1 day
         """
 
+    @property
+    def decompression_max_window_size(self) -> int:
+        """
+        Sets an upper limit on the window size for decompression operations
+        in kibibytes. This setting can be used to prevent large memory
+        allocations for inputs using large compression windows.
+
+        Use 0 for no limit.
+
+        A reasonable value is 0 for no limit. Alternatively, it should be 8mb if
+        trying to match the zstandard minimum decoder requirements. The
+        remaining alternative would be as high as the server can bear, noting
+        that this much memory may be allocated by every websocket connection up
+        to 3 times (once for standard decompression without a custom dictionary,
+        once for the most recent custom dictionary, and once for the second most
+        recent custom dictionary). If disabling training, a websocket will use
+        up to 1x this memory on decompression buffers.
+
+        WARN:
+            This should not be considered a security measure. Authorization
+            is already passed prior to decompression, and if that is not enough
+            to eliminate adversarial payloads, then disable compression.
+        """
+
 
 class CompressionConfigFromParts:
     """Convenience class that allows you to create a CompressionConfig protocol
@@ -368,6 +391,7 @@ class CompressionConfigFromParts:
         compression_training_low_watermark: int,
         compression_training_high_watermark: int,
         compression_retrain_interval_seconds: int,
+        decompression_max_window_size: int,
     ):
         if compression_allowed:
             try:
@@ -396,6 +420,7 @@ class CompressionConfigFromParts:
         self.compression_training_low_watermark = compression_training_low_watermark
         self.compression_training_high_watermark = compression_training_high_watermark
         self.compression_retrain_interval_seconds = compression_retrain_interval_seconds
+        self.decompression_max_window_size = decompression_max_window_size
 
     async def get_compression_dictionary_by_id(
         self, dictionary_id: int, /
@@ -612,6 +637,10 @@ class ConfigFromParts:
     @property
     def compression_retrain_interval_seconds(self) -> int:
         return self.compression.compression_retrain_interval_seconds
+
+    @property
+    def decompression_max_window_size(self) -> int:
+        return self.compression.decompression_max_window_size
 
 
 if TYPE_CHECKING:

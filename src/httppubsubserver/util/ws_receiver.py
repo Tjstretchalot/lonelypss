@@ -64,6 +64,10 @@ class FanoutWSReceiver(BaseWSReceiver, Protocol):
     to replicate the one-subscriber scenario.
     """
 
+    @property
+    def receiver_url(self) -> str:
+        """The URL that this receiver expects to receive messages from"""
+
     async def register_receiver(self, receiver: BaseWSReceiver) -> int:
         """Registers a receiver to receive messages from this fanout receiver.
         Returns the id that can be passed to `unregister_receiver`

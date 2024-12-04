@@ -1,4 +1,6 @@
 import base64
+from dataclasses import dataclass
+from enum import Enum, auto
 import json
 import tempfile
 import time
@@ -11,6 +13,8 @@ import logging
 
 from httppubsubserver.middleware.config import get_config_from_request
 from httppubsubserver.util.close_guarded_io import CloseGuardedIO
+from httppubsubserver.util.sync_io import read_exact, SyncIOBaseLikeIO
+from httppubsubserver.config.config import Config
 
 
 class NotifyResponse(BaseModel):
@@ -77,10 +81,10 @@ async def notify(
                 break
 
         request_body.seek(0)
-        topic_length = int.from_bytes(request_body.read(2), "big")
-        topic = request_body.read(topic_length)
-        message_hash = request_body.read(64)
-        message_length = int.from_bytes(request_body.read(8), "big")
+        topic_length = int.from_bytes(read_exact(request_body, 2), "big")
+        topic = read_exact(request_body, topic_length)
+        message_hash = read_exact(request_body, 64)
+        message_length = int.from_bytes(read_exact(request_body, 8), "big")
 
         auth_at = time.time()
         auth_result = await config.is_notify_allowed(
@@ -129,18 +133,7 @@ async def notify(
         if actual_hash != message_hash:
             return Response(status_code=400)
 
-        message_starts_at = 2 + topic_length + 64 + 8
-        num_succeeded = 0
-
-        headers: Dict[str, str] = {
-            "Content-Type": "application/octet-stream",
-            "Content-Length": str(message_length),
-            "Repr-Digest": f"sha-512={base64.b64encode(message_hash).decode('ascii')}",
-            "X-Topic": base64.b64encode(topic).decode("ascii"),
-        }
-
-        guarded_request_body = CloseGuardedIO(request_body)
-
+        request_body.seek(2 + topic_length + 64 + 8)
         async with aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(
                 total=config.outgoing_http_timeout_total,
@@ -149,70 +142,141 @@ async def notify(
                 sock_connect=config.outgoing_http_timeout_sock_connect,
             )
         ) as session:
-            async for subscriber in config.get_subscribers(topic=topic):
-                if subscriber["type"] == "unavailable":
-                    return Response(status_code=503)
+            notify_result = await handle_trusted_notify(
+                topic,
+                request_body,
+                config=config,
+                session=session,
+                content_length=message_length,
+                sha512=actual_hash,
+            )
 
-                url = subscriber["url"]
-                my_authorization = await config.setup_authorization(
-                    url=url, topic=topic, message_sha512=message_hash, now=time.time()
-                )
-                if my_authorization is None:
-                    headers.pop("Authorization", None)
-                else:
-                    headers["Authorization"] = my_authorization
-
-                request_body.seek(message_starts_at)
-                try:
-                    async with session.post(
-                        url,
-                        data=guarded_request_body,
-                        headers=headers,
-                    ) as resp:
-                        if resp.ok:
-                            logging.debug(
-                                f"Successfully notified {url} about {topic!r}"
-                            )
-                            num_succeeded += 1
-                        else:
-                            logging.warning(
-                                f"Failed to notify {url} about {topic!r}: {resp.status}"
-                            )
-
-                            if resp.status >= 400 and resp.status < 500:
-                                content_type = resp.headers.get("Content-Type")
-                                if (
-                                    content_type is not None
-                                    and content_type.startswith("application/json")
-                                ):
-                                    content = await resp.json()
-                                    if (
-                                        isinstance(content, dict)
-                                        and content.get("unsubscribe") is True
-                                    ):
-                                        logging.info(
-                                            f"Unsubscribing {url} from {topic!r} due to response: {json.dumps(content)}"
-                                        )
-
-                                        if subscriber["type"] == "exact":
-                                            await config.unsubscribe_exact(
-                                                url=url, exact=topic
-                                            )
-                                        else:
-                                            await config.unsubscribe_glob(
-                                                url=url, glob=subscriber["glob"]
-                                            )
-                except aiohttp.ClientError:
-                    logging.error(
-                        f"Failed to notify {url} about {topic!r}", exc_info=True
-                    )
+        if notify_result.type == TrustedNotifyResultType.UNAVAILABLE:
+            return Response(status_code=503)
 
         return Response(
             status_code=200,
             content=NotifyResponse.__pydantic_serializer__.to_json(
-                NotifyResponse(notified=num_succeeded)
+                NotifyResponse(notified=notify_result.succeeded)
             ),
             headers={
                 "Content-Type": "application/json; charset=utf-8",
             },
         )
+
+
+class TrustedNotifyResultType(Enum):
+    UNAVAILABLE = auto()
+    """We had trouble accessing the data store and may not have attempted all
+    subscribers
+    """
+    OK = auto()
+    """We at least attempted all subscribers"""
+
+
+@dataclass
+class TrustedNotifyResult:
+    type: TrustedNotifyResultType
+    """If we attempted all subscribers"""
+    succeeded: int
+    """The number of subscribers we reached"""
+    failed: int
+    """The number of subscribers we could not reach"""
+
+
+async def handle_trusted_notify(
+    topic: bytes,
+    data: SyncIOBaseLikeIO,
+    /,
+    *,
+    config: Config,
+    session: aiohttp.ClientSession,
+    content_length: int,
+    sha512: bytes,
+) -> TrustedNotifyResult:
+    """Notifies subscribers to the given topic with the given data.
+
+    Args:
+        topic (bytes): the topic the message was sent to
+        data (file-like, readable, bytes): the message that was sent
+        config (Config): the broadcaster configuration to use
+        session (aiohttp.ClientSession): the aiohttp client session to
+            send requests to clients in
+        content_length (int): the length of the message in bytes. The stream
+            MUST not have more than this amount of data in it, as we will read
+            past this length if it does
+        sha512 (bytes): the sha512 hash of the content (64 bytes)
+    """
+    succeeded = 0
+    attempted = 0
+    headers: Dict[str, str] = {
+        "Content-Type": "application/octet-stream",
+        "Content-Length": str(content_length),
+        "Repr-Digest": f"sha-512={base64.b64encode(sha512).decode('ascii')}",
+        "X-Topic": base64.b64encode(topic).decode("ascii"),
+    }
+
+    message_starts_at = data.tell()
+    guarded_request_body = CloseGuardedIO(data)
+
+    async for subscriber in config.get_subscribers(topic=topic):
+        if subscriber["type"] == "unavailable":
+            return TrustedNotifyResult(
+                type=TrustedNotifyResultType.UNAVAILABLE,
+                succeeded=succeeded,
+                failed=attempted - succeeded,
+            )
+
+        attempted += 1
+        url = subscriber["url"]
+        my_authorization = await config.setup_authorization(
+            url=url, topic=topic, message_sha512=sha512, now=time.time()
+        )
+        if my_authorization is None:
+            headers.pop("Authorization", None)
+        else:
+            headers["Authorization"] = my_authorization
+
+        data.seek(message_starts_at)
+        try:
+            async with session.post(
+                url,
+                data=guarded_request_body,
+                headers=headers,
+            ) as resp:
+                if resp.ok:
+                    logging.debug(f"Successfully notified {url} about {topic!r}")
+                    succeeded += 1
+                else:
+                    logging.warning(
+                        f"Failed to notify {url} about {topic!r}: {resp.status}"
+                    )
+
+                    if resp.status >= 400 and resp.status < 500:
+                        content_type = resp.headers.get("Content-Type")
+                        if content_type is not None and content_type.startswith(
+                            "application/json"
+                        ):
+                            content = await resp.json()
+                            if (
+                                isinstance(content, dict)
+                                and content.get("unsubscribe") is True
+                            ):
+                                logging.info(
+                                    f"Unsubscribing {url} from {topic!r} due to response: {json.dumps(content)}"
+                                )
+
+                                if subscriber["type"] == "exact":
+                                    await config.unsubscribe_exact(url=url, exact=topic)
+                                else:
+                                    await config.unsubscribe_glob(
+                                        url=url, glob=subscriber["glob"]
+                                    )
+        except aiohttp.ClientError:
+            logging.error(f"Failed to notify {url} about {topic!r}", exc_info=True)
+
+    return TrustedNotifyResult(
+        type=TrustedNotifyResultType.OK,
+        succeeded=succeeded,
+        failed=attempted - succeeded,
+    )

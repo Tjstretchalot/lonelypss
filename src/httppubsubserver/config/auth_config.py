@@ -64,6 +64,11 @@ class IncomingAuthConfig(Protocol):
         the message should be used, which will be fully verified before any
         notifications go out.
 
+        Note that in websockets where compression is enabled, the sha512 is
+        of the compressed content, as we cannot safely decompress the data (and
+        thus compute the decompressed sha512) unless we know it is safe, at which
+        point a second check would be redundant.
+
         Args:
             topic (bytes): the topic that the message is being sent to
             message_sha512 (bytes): the sha512 of the message being sent
