@@ -8,6 +8,7 @@ import time
 from typing import (
     TYPE_CHECKING,
     Callable,
+    Coroutine,
     Dict,
     List,
     Literal,
@@ -18,6 +19,7 @@ from typing import (
     Type,
     Union,
     cast,
+    IO,
 )
 import aiohttp
 from fastapi import APIRouter, WebSocket
@@ -119,6 +121,11 @@ def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
             headers["authorization"] = read_exact(stream, length)
 
             length = int.from_bytes(read_exact(stream, 2), "big")
+            if length > 64:
+                raise ValueError("message id max 64 bytes")
+            headers["x-identifier"] = read_exact(stream, length)
+
+            length = int.from_bytes(read_exact(stream, 2), "big")
             if length > 8:
                 raise ValueError("part id max 8 bytes")
             part_id_bytes = read_exact(stream, length)
@@ -132,7 +139,6 @@ def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
                     "x-compressed-length",
                     "x-deflated-length",
                     "x-compressed-sha512",
-                    "x-identifier",
                 ]
             else:
                 minimal_headers = ["x-identifier"]
@@ -366,6 +372,7 @@ class _CompressorPreparing:
 _Compressor = Union[_CompressorReady, _CompressorPreparing]
 
 
+@dataclass
 class _ReceivingNotify:
     """A notification we are in the process of receiving"""
 
@@ -374,11 +381,12 @@ class _ReceivingNotify:
 
     last_part_id: int
     topic: bytes
-    dictionary_id: int
+    compressor_id: int
     compressed_length: int
     deflated_length: int
     compressed_sha512: bytes
 
+    body_hasher: hashlib._Hash
     body: SyncIOBaseLikeIO
 
 
@@ -397,11 +405,17 @@ class _StateOpen:
 
     read_task: asyncio.Task[WSMessage]
     send_task: Optional[asyncio.Task[None]]
+    process_task: Optional[asyncio.Task[None]]
+    """If we are currently processing an incoming WSMessage, the corresponding task,
+    otherwise, None
+    """
     message_task: asyncio.Task[Union[_SmallMessage, _LargeMessage]]
     pending_sends: deque[Union[_SmallMessage, _LargeSpooledMessage, _FormattedMessage]]
     """If we can't push a message to the send_task immediately, we move it here.
     When we move large messages to this queue, we spool them to file
     """
+    unprocessed_receives: deque[_ParsedWSMessage]
+    """If we receive a message but can't set process_task immediately, we move it here."""
     incoming_notification: Optional[_ReceivingNotify]
     """If the subscriber is streaming us a notification, the current object
     tracking the state of that stream, otherwise None to indicate no notification
@@ -466,8 +480,12 @@ async def _handle_accepting(state: _State) -> _State:
         my_receiver=my_receiver,
         read_task=_make_websocket_read_task(state.websocket),
         send_task=None,
+        process_task=None,
         message_task=asyncio.create_task(my_receiver.queue.get()),
         pending_sends=deque(maxlen=state.config.websocket_max_pending_sends),
+        unprocessed_receives=deque(
+            maxlen=state.config.websocket_max_unprocessed_receives
+        ),
         incoming_notification=None,
         active_compressor=None,
         last_compressor=None,
@@ -628,121 +646,123 @@ async def _check_training_data(state: _StateOpen) -> _State:
 
         if (
             state.training_data.collector.length
-            >= state.broadcaster_config.compression_training_low_watermark
+            < state.broadcaster_config.compression_training_low_watermark
         ):
-            samples: List[bytes] = []
-            state.training_data.collector.tmpfile.seek(0)
-            while True:
-                length_bytes = state.training_data.collector.tmpfile.read(4)
-                if not length_bytes:
-                    break
-                assert len(length_bytes) == 4
-                length = int.from_bytes(length_bytes, "big")
-                samples.append(
-                    read_exact(state.training_data.collector.tmpfile, length)
-                )
+            state.training_data.dirty = False
+            return state
 
-            dictionary_id = state.custom_compression_dict_counter
-            state.custom_compression_dict_counter += 1
+        samples: List[bytes] = []
+        state.training_data.collector.tmpfile.seek(0)
+        while True:
+            length_bytes = state.training_data.collector.tmpfile.read(4)
+            if not length_bytes:
+                break
+            assert len(length_bytes) == 4
+            length = int.from_bytes(length_bytes, "big")
+            samples.append(read_exact(state.training_data.collector.tmpfile, length))
 
-            async def _make_compressor() -> _CompressorReady:
-                zdict, level = (
-                    await state.broadcaster_config.train_compression_dict_low_watermark(
-                        samples
-                    )
+        dictionary_id = state.custom_compression_dict_counter
+        state.custom_compression_dict_counter += 1
+
+        async def _make_compressor() -> _CompressorReady:
+            zdict, level = (
+                await state.broadcaster_config.train_compression_dict_low_watermark(
+                    samples
                 )
-                return _CompressorReady(
-                    type=_CompressorState.READY,
-                    dictionary_id=dictionary_id,
+            )
+            return _CompressorReady(
+                type=_CompressorState.READY,
+                dictionary_id=dictionary_id,
+                level=level,
+                data=zdict,
+                compressor=zstandard.ZstdCompressor(
                     level=level,
-                    data=zdict,
-                    compressor=zstandard.ZstdCompressor(
-                        level=level,
-                        dict_data=zdict,
-                        write_checksum=False,
-                        write_content_size=False,
-                        write_dict_id=False,
-                    ),
-                    decompressor=zstandard.ZstdDecompressor(
-                        dict_data=zdict,
-                        max_window_size=state.broadcaster_config.decompression_max_window_size,
-                    ),
-                )
-
-            _rotate_compressor(
-                state,
-                _CompressorPreparing(
-                    type=_CompressorState.PREPARING,
-                    dictionary_id=dictionary_id,
-                    task=asyncio.create_task(_make_compressor()),
+                    dict_data=zdict,
+                    write_checksum=False,
+                    write_content_size=False,
+                    write_dict_id=False,
+                ),
+                decompressor=zstandard.ZstdDecompressor(
+                    dict_data=zdict,
+                    max_window_size=state.broadcaster_config.decompression_max_window_size,
                 ),
             )
-            state.training_data = _CompressorTrainingInfoBeforeHighWatermark(
-                type=_CompressorTrainingInfoType.BEFORE_HIGH_WATERMARK,
-                collector=state.training_data.collector,
-                dirty=False,
-            )
-            return state
+
+        _rotate_compressor(
+            state,
+            _CompressorPreparing(
+                type=_CompressorState.PREPARING,
+                dictionary_id=dictionary_id,
+                task=asyncio.create_task(_make_compressor()),
+            ),
+        )
+        state.training_data = _CompressorTrainingInfoBeforeHighWatermark(
+            type=_CompressorTrainingInfoType.BEFORE_HIGH_WATERMARK,
+            collector=state.training_data.collector,
+            dirty=False,
+        )
+        return state
 
     if state.training_data.type == _CompressorTrainingInfoType.BEFORE_HIGH_WATERMARK:
         if (
             state.training_data.collector.length
-            >= state.broadcaster_config.compression_training_high_watermark
+            < state.broadcaster_config.compression_training_high_watermark
         ):
-            samples = []
-            state.training_data.collector.tmpfile.seek(0)
-            while True:
-                length_bytes = state.training_data.collector.tmpfile.read(4)
-                if not length_bytes:
-                    break
-                assert len(length_bytes) == 4
-                length = int.from_bytes(length_bytes, "big")
-                samples.append(
-                    read_exact(state.training_data.collector.tmpfile, length)
-                )
+            state.training_data.dirty = False
+            return state
 
-            dictionary_id = state.custom_compression_dict_counter
-            state.custom_compression_dict_counter += 1
+        samples = []
+        state.training_data.collector.tmpfile.seek(0)
+        while True:
+            length_bytes = state.training_data.collector.tmpfile.read(4)
+            if not length_bytes:
+                break
+            assert len(length_bytes) == 4
+            length = int.from_bytes(length_bytes, "big")
+            samples.append(read_exact(state.training_data.collector.tmpfile, length))
 
-            async def _make_compressor() -> _CompressorReady:
-                zdict, level = (
-                    await state.broadcaster_config.train_compression_dict_high_watermark(
-                        samples
-                    )
+        dictionary_id = state.custom_compression_dict_counter
+        state.custom_compression_dict_counter += 1
+
+        async def _make_compressor() -> _CompressorReady:
+            zdict, level = (
+                await state.broadcaster_config.train_compression_dict_high_watermark(
+                    samples
                 )
-                return _CompressorReady(
-                    type=_CompressorState.READY,
-                    dictionary_id=dictionary_id,
+            )
+            return _CompressorReady(
+                type=_CompressorState.READY,
+                dictionary_id=dictionary_id,
+                level=level,
+                data=zdict,
+                compressor=zstandard.ZstdCompressor(
                     level=level,
-                    data=zdict,
-                    compressor=zstandard.ZstdCompressor(
-                        level=level,
-                        dict_data=zdict,
-                        write_checksum=False,
-                        write_content_size=False,
-                        write_dict_id=False,
-                    ),
-                    decompressor=zstandard.ZstdDecompressor(
-                        dict_data=zdict,
-                        max_window_size=state.broadcaster_config.decompression_max_window_size,
-                    ),
-                )
-
-            _rotate_compressor(
-                state,
-                _CompressorPreparing(
-                    type=_CompressorState.PREPARING,
-                    dictionary_id=dictionary_id,
-                    task=asyncio.create_task(_make_compressor()),
+                    dict_data=zdict,
+                    write_checksum=False,
+                    write_content_size=False,
+                    write_dict_id=False,
+                ),
+                decompressor=zstandard.ZstdDecompressor(
+                    dict_data=zdict,
+                    max_window_size=state.broadcaster_config.decompression_max_window_size,
                 ),
             )
-            state.training_data.collector.tmpfile.close()
-            state.training_data = _CompressorTrainingInfoWaitingToRefresh(
-                type=_CompressorTrainingInfoType.WAITING_TO_REFRESH,
-                last_refreshed_at=time.time(),
-                dirty=False,
-            )
-            return state
+
+        _rotate_compressor(
+            state,
+            _CompressorPreparing(
+                type=_CompressorState.PREPARING,
+                dictionary_id=dictionary_id,
+                task=asyncio.create_task(_make_compressor()),
+            ),
+        )
+        state.training_data.collector.tmpfile.close()
+        state.training_data = _CompressorTrainingInfoWaitingToRefresh(
+            type=_CompressorTrainingInfoType.WAITING_TO_REFRESH,
+            last_refreshed_at=time.time(),
+            dirty=False,
+        )
+        return state
 
     return state
 
@@ -1205,6 +1225,676 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
         part_id += 1
 
 
+async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> None:
+    assert message.type == _ParsedWSMessageType.CONFIGURE
+    if state.socket_level_config is not None:
+        raise ValueError("configuration already set")
+    rdr = io.BytesIO(message.body)
+    subscriber_nonce = read_exact(rdr, 32)
+    flags = _ConfigurationFlags(int.from_bytes(read_exact(rdr, 4), "big"))
+    dictionary_id = int.from_bytes(read_exact(rdr, 2), "big")
+
+    broadcaster_nonce = secrets.token_bytes(32)
+    connection_nonce = hashlib.sha256(subscriber_nonce + broadcaster_nonce).digest()
+    state.socket_level_config = _Configuration(
+        flags=flags,
+        dictionary_id=dictionary_id,
+        nonce_b64=base64.urlsafe_b64encode(connection_nonce).decode("ascii"),
+    )
+
+    if (
+        ((flags & _ConfigurationFlags.ZSTD_ENABLED) == 0)
+        or ((flags & _ConfigurationFlags.ZSTD_TRAINING_ALLOWED) == 0)
+    ) and state.training_data is not None:
+        if state.training_data.type == _CompressorTrainingInfoType.BEFORE_LOW_WATERMARK:
+            state.training_data.collector.tmpfile.close()
+        if (
+            state.training_data.type
+            == _CompressorTrainingInfoType.BEFORE_HIGH_WATERMARK
+        ):
+            state.training_data.collector.tmpfile.close()
+        state.training_data = None
+
+    if (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0:
+        state.standard_compressor = _CompressorReady(
+            type=_CompressorState.READY,
+            dictionary_id=1,
+            level=3,
+            data=None,
+            compressor=zstandard.ZstdCompressor(
+                level=3,
+                write_checksum=False,
+                write_content_size=False,
+                write_dict_id=False,
+            ),
+            decompressor=zstandard.ZstdDecompressor(
+                max_window_size=state.broadcaster_config.decompression_max_window_size
+            ),
+        )
+
+    if (
+        dictionary_id != 0  # "no compression"
+        and dictionary_id != 1  # reserved for not using a dictionary
+        and (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0
+        and state.broadcaster_config.compression_allowed
+        and (
+            state.active_compressor is None
+            or dictionary_id != state.active_compressor.dictionary_id
+        )
+    ):
+
+        async def _make_compressor() -> _CompressorReady:
+            requested = await state.broadcaster_config.get_compression_dictionary_by_id(
+                dictionary_id
+            )
+            if requested is None:
+                raise ValueError("dictionary not found")
+
+            zdict, level = requested
+
+            return _CompressorReady(
+                type=_CompressorState.READY,
+                dictionary_id=dictionary_id,
+                level=level,
+                data=zdict,
+                compressor=zstandard.ZstdCompressor(
+                    level=level,
+                    dict_data=zdict,
+                    write_checksum=False,
+                    write_content_size=False,
+                    write_dict_id=False,
+                ),
+                decompressor=zstandard.ZstdDecompressor(
+                    dict_data=zdict,
+                    max_window_size=state.broadcaster_config.decompression_max_window_size,
+                ),
+            )
+
+        _rotate_compressor(
+            state,
+            _CompressorPreparing(
+                type=_CompressorState.PREPARING,
+                dictionary_id=dictionary_id,
+                task=asyncio.create_task(_make_compressor()),
+            ),
+        )
+
+    state.read_task = _make_websocket_read_task(state.websocket)
+
+    state.pending_sends.append(
+        _FormattedMessage(
+            type=_MessageType.FORMATTED,
+            websocket_data=_make_websocket_message(
+                message.flags,
+                _OutgoingParsedWSMessageType.CONFIRM_CONFIGURE,
+                [("x-broadcaster-nonce", broadcaster_nonce)],
+                b"",
+            ),
+        )
+    )
+
+
+async def _acknowledge_compressor_ready(
+    state: _StateOpen, compressor: _CompressorReady
+) -> _State:
+    if compressor.dictionary_id <= 1:
+        return state
+
+    is_preset = compressor.dictionary_id < 65536
+
+    headers = _make_websocket_message(
+        _ParsedWSMessageFlags.MINIMAL_HEADERS,
+        (
+            _OutgoingParsedWSMessageType.ENABLE_ZSTD_PRESET
+            if is_preset
+            else _OutgoingParsedWSMessageType.ENABLE_ZSTD_CUSTOM
+        ),
+        [
+            (
+                "x-identifier",
+                compressor.dictionary_id.to_bytes(
+                    _smallest_unsigned_size(compressor.dictionary_id),
+                    "big",
+                ),
+            ),
+            (
+                "x-compression-level",
+                compressor.level.to_bytes(
+                    _smallest_unsigned_size(compressor.level),
+                    "big",
+                ),
+            ),
+        ],
+        b"",
+    )
+
+    if not is_preset:
+        assert compressor.data is not None, "custom compressor without custom dict?"
+        dict_data_bytes = compressor.data.as_bytes()
+        if (
+            state.broadcaster_config.outgoing_max_ws_message_size is not None
+            and len(headers) + len(dict_data_bytes)
+            > state.broadcaster_config.outgoing_max_ws_message_size
+        ):
+            raise ValueError(
+                f"cannot transfer {len(dict_data_bytes)} byte dictionary with "
+                f"{state.broadcaster_config.outgoing_max_ws_message_size} byte max "
+                f"outgoing websocket message size ({len(headers)} bytes needed for headers)"
+            )
+
+        message = headers + dict_data_bytes
+    else:
+        message = headers
+
+    if state.send_task is None:
+        state.send_task = asyncio.create_task(state.websocket.send_bytes(message))
+    else:
+        state.pending_sends.append(
+            _FormattedMessage(type=_MessageType.FORMATTED, websocket_data=message)
+        )
+    return state
+
+
+async def _process_subscribe_or_unsubscribe(
+    state: _StateOpen, message: _ParsedWSMessage
+) -> None:
+    assert (
+        message.type == _ParsedWSMessageType.SUBSCRIBE
+        or message.type == _ParsedWSMessageType.UNSUBSCRIBE
+    )
+    payload = parse_subscribe_payload(io.BytesIO(message.body))
+
+    authorization_bytes = message.headers.get("authorization")
+    authorization = (
+        None if authorization_bytes is None else authorization_bytes.decode("utf-8")
+    )
+    url = _make_for_receive_websocket_url_and_change_counter(state)
+    if payload.url != url:
+        raise ValueError("unexpected url target for subscribe")
+
+    auth_at = time.time()
+    if payload.type == SubscribeType.EXACT:
+        auth_result = await state.broadcaster_config.is_subscribe_exact_allowed(
+            url=url,
+            exact=payload.topic,
+            now=auth_at,
+            authorization=authorization,
+        )
+    else:
+        auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
+            url=url,
+            glob=payload.glob,
+            now=auth_at,
+            authorization=authorization,
+        )
+
+    if auth_result != "ok":
+        raise Exception(auth_result)
+
+    if payload.type == SubscribeType.EXACT:
+        if message.type == _ParsedWSMessageType.SUBSCRIBE:
+            if payload.topic in state.my_receiver.exact_subscriptions:
+                raise Exception(f"already subscribed to {payload.topic!r}")
+
+            state.my_receiver.exact_subscriptions.add(payload.topic)
+            await state.receiver.increment_exact(payload.topic)
+            response = _make_websocket_message(
+                flags=message.flags,
+                message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_EXACT,
+                headers=[("x-topic", payload.topic)],
+                body=b"",
+            )
+        else:
+            try:
+                state.my_receiver.exact_subscriptions.remove(payload.topic)
+            except KeyError:
+                raise Exception(f"not subscribed to {payload.topic!r}")
+
+            await state.receiver.decrement_exact(payload.topic)
+            response = _make_websocket_message(
+                flags=message.flags,
+                message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
+                headers=[("x-topic", payload.topic)],
+                body=b"",
+            )
+    else:
+        if message.type == _ParsedWSMessageType.SUBSCRIBE:
+            if any(
+                payload.glob == glob for _, glob in state.my_receiver.glob_subscriptions
+            ):
+                raise Exception(f"already subscribed to {payload.glob}")
+
+            glob_regex = re.compile(translate(payload.glob))
+            state.my_receiver.glob_subscriptions.append((glob_regex, payload.glob))
+            await state.receiver.increment_glob(payload.glob)
+            response = _make_websocket_message(
+                flags=message.flags,
+                message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
+                headers=[("x-glob", payload.glob.encode("utf-8"))],
+                body=b"",
+            )
+        else:
+            subscription_idx: Optional[int] = None
+            for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions):
+                if glob == payload.glob:
+                    subscription_idx = idx
+                    break
+
+            if subscription_idx is None:
+                raise Exception(f"not subscribed to {payload.glob}")
+
+            state.my_receiver.glob_subscriptions.pop(subscription_idx)
+            await state.receiver.decrement_glob(payload.glob)
+            response = _make_websocket_message(
+                flags=message.flags,
+                message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
+                headers=[("x-glob", payload.glob.encode("utf-8"))],
+                body=b"",
+            )
+
+    if state.send_task is None:
+        state.send_task = asyncio.create_task(state.websocket.send_bytes(response))
+    else:
+        state.pending_sends.append(
+            _FormattedMessage(type=_MessageType.FORMATTED, websocket_data=response)
+        )
+
+
+async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
+    assert message.type == _ParsedWSMessageType.NOTIFY
+    if state.socket_level_config is None:
+        raise Exception("notify before configure")
+
+    compressor_id_bytes = message.headers.get("x-compressor", b"\x00")
+    if len(compressor_id_bytes) > 8:
+        raise ValueError("x-compressor max 8 bytes")
+
+    message_id = message.headers["x-identifier"]
+    if len(message_id) > 64:
+        raise ValueError("x-identifier max 64 bytes")
+
+    compressor_id = int.from_bytes(compressor_id_bytes, "big")
+
+    if compressor_id != 0 and (
+        not state.broadcaster_config.compression_allowed
+        or (state.socket_level_config.flags & _ConfigurationFlags.ZSTD_ENABLED) == 0
+    ):
+        raise ValueError("compression used but compression is forbidden")
+
+    body_io = io.BytesIO(message.body)
+    topic_length = int.from_bytes(read_exact(body_io, 2), "big")
+    topic = read_exact(body_io, topic_length)
+    compressed_sha512 = read_exact(body_io, 64)
+
+    authorization_bytes = message.headers.get("authorization")
+    authorization = (
+        None if authorization_bytes is None else authorization_bytes.decode("utf-8")
+    )
+    auth_result = await state.broadcaster_config.is_notify_allowed(
+        topic=topic,
+        message_sha512=compressed_sha512,
+        now=time.time(),
+        authorization=authorization,
+    )
+    if auth_result != "ok":
+        raise Exception(auth_result)
+
+    compressed_length = int.from_bytes(read_exact(body_io, 8), "big")
+    compressed_data = read_exact(body_io, compressed_length)
+
+    real_compressed_sha512 = hashlib.sha512(compressed_data).digest()
+    if real_compressed_sha512 != compressed_sha512:
+        raise Exception("integrity check failed")
+
+    decompressor: Optional[_Compressor]
+    if compressor_id == 0:
+        decompressor = None
+    elif (
+        state.standard_compressor is not None
+        and compressor_id == state.standard_compressor.dictionary_id
+    ):
+        decompressor = state.standard_compressor
+    elif (
+        state.active_compressor is not None
+        and compressor_id == state.active_compressor.dictionary_id
+    ):
+        decompressor = state.active_compressor
+    elif (
+        state.last_compressor is not None
+        and compressor_id == state.last_compressor.dictionary_id
+    ):
+        decompressor = state.last_compressor
+    else:
+        raise ValueError("unrecognized compressor id")
+
+    decompressed_data: Optional[SyncIOBaseLikeIO] = None
+    if decompressor is None:
+        decompressed_data = io.BytesIO(compressed_data)
+        decompressed_sha512 = hashlib.sha512(compressed_data).digest()
+        decompressed_length = len(compressed_data)
+    else:
+        if decompressor.type == _CompressorState.PREPARING:
+            decompressor = await decompressor.task
+
+        unseekable_decompressed_data = decompressor.decompressor.stream_reader(
+            compressed_data
+        )
+        decompressed_hasher = hashlib.sha512()
+        try:
+            decompressed_data = tempfile.SpooledTemporaryFile(
+                max_size=state.broadcaster_config.message_body_spool_size
+            )
+            while True:
+                chunk = unseekable_decompressed_data.read(io.DEFAULT_BUFFER_SIZE)
+                if not chunk:
+                    break
+                decompressed_data.write(chunk)
+                decompressed_hasher.update(chunk)
+                await asyncio.sleep(0)
+            decompressed_sha512 = decompressed_hasher.digest()
+            decompressed_length = decompressed_data.tell()
+            decompressed_data.seek(0)
+        except BaseException:
+            if decompressed_data is not None:
+                decompressed_data.close()
+            raise
+        finally:
+            unseekable_decompressed_data.close()
+
+    try:
+        notify_result = await handle_trusted_notify(
+            topic,
+            decompressed_data,
+            config=state.broadcaster_config,
+            session=state.client_session,
+            content_length=decompressed_length,
+            sha512=decompressed_sha512,
+        )
+    finally:
+        decompressed_data.close()
+
+    if notify_result.type == TrustedNotifyResultType.UNAVAILABLE:
+        raise Exception("failed to attempt all subscribers")
+
+    to_send = _make_websocket_message(
+        message.flags,
+        _OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
+        [
+            ("x-identifier", message_id),
+            (
+                "x-subscribers",
+                notify_result.succeeded.to_bytes(
+                    _smallest_unsigned_size(notify_result.succeeded), "big"
+                ),
+            ),
+        ],
+        b"",
+    )
+
+    if state.send_task is None:
+        state.send_task = asyncio.create_task(state.websocket.send_bytes(to_send))
+    else:
+        state.pending_sends.append(
+            _FormattedMessage(type=_MessageType.FORMATTED, websocket_data=to_send)
+        )
+
+
+async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -> None:
+    assert message.type == _ParsedWSMessageType.NOTIFY_STREAM
+
+    message_id = message.headers["x-identifier"]
+    if (
+        state.incoming_notification is not None
+        and state.incoming_notification.identifier != message_id
+    ):
+        raise ValueError("did not finish last message")
+
+    part_id_bytes = message.headers["x-part-id"]
+    if len(part_id_bytes) > 8:
+        raise ValueError("x-part-id max 8 bytes")
+
+    part_id = int.from_bytes(part_id_bytes, "big")
+
+    notif = state.incoming_notification
+    if part_id == 0:
+        if notif is not None:
+            raise ValueError("did not complete previous message")
+        topic = message.headers["x-topic"]
+        compressor_id_bytes = message.headers["x-compressor"]
+        if len(compressor_id_bytes) > 8:
+            raise ValueError("compressor id max 8 bytes")
+        compressor_id = int.from_bytes(compressor_id_bytes, "big")
+        compressed_length_bytes = message.headers["x-compressed-length"]
+        if len(compressed_length_bytes) > 8:
+            raise ValueError("compressed length max 8 bytes")
+        compressed_length = int.from_bytes(compressed_length_bytes, "big")
+        deflated_length_bytes = message.headers["x-deflated-length"]
+        if len(deflated_length_bytes) > 8:
+            raise ValueError("deflated length max 8 bytes")
+        deflated_length = int.from_bytes(deflated_length_bytes, "big")
+        compressed_sha512 = message.headers["x-compressed-sha512"]
+        if len(compressed_sha512) != 64:
+            raise ValueError("sha512 must be exactly 64 bytes")
+
+        notif = _ReceivingNotify(
+            identifier=message_id,
+            last_part_id=-1,
+            topic=topic,
+            compressor_id=compressor_id,
+            compressed_length=compressed_length,
+            deflated_length=deflated_length,
+            compressed_sha512=compressed_sha512,
+            body_hasher=hashlib.sha512(),
+            body=tempfile.SpooledTemporaryFile(
+                max_size=state.broadcaster_config.message_body_spool_size
+            ),
+        )
+        state.incoming_notification = notif
+    else:
+        if notif is None or notif.last_part_id + 1 != part_id:
+            raise ValueError("received part out of order")
+
+    # verify we will still be able to decompress this message
+    if notif.compressor_id != 0:
+        if not (
+            (
+                state.standard_compressor is not None
+                and state.standard_compressor.dictionary_id == notif.compressor_id
+            )
+            or (
+                state.active_compressor is not None
+                and state.active_compressor.dictionary_id == notif.compressor_id
+            )
+            or (
+                state.last_compressor is not None
+                and state.last_compressor.dictionary_id == notif.compressor_id
+            )
+        ):
+            raise ValueError("unknown compressor id")
+
+    notif.body_hasher.update(message.body)
+    notif.body.write(message.body)
+    compressed_bytes_so_far = notif.body.tell()
+    if compressed_bytes_so_far > notif.compressed_length:
+        raise ValueError("compressed message exceeds indicated length")
+
+    if compressed_bytes_so_far < notif.compressed_length:
+        ack_message = _make_websocket_message(
+            message.flags,
+            _OutgoingParsedWSMessageType.CONTINUE_NOTIFY,
+            [("x-identifier", notif.identifier), ("x-part-id", part_id_bytes)],
+            b"",
+        )
+        if state.send_task is None:
+            state.send_task = asyncio.create_task(
+                state.websocket.send_bytes(ack_message)
+            )
+        else:
+            state.pending_sends.append(
+                _FormattedMessage(
+                    type=_MessageType.FORMATTED, websocket_data=ack_message
+                )
+            )
+        return
+
+    actual_compressed_sha512 = notif.body_hasher.digest()
+    if actual_compressed_sha512 != notif.compressed_sha512:
+        raise ValueError("integrity mismatch")
+
+    compressor: Optional[_Compressor] = None
+    if (
+        state.standard_compressor is not None
+        and notif.compressor_id == state.standard_compressor.dictionary_id
+    ):
+        compressor = state.standard_compressor
+    elif (
+        state.active_compressor is not None
+        and notif.compressor_id == state.active_compressor.dictionary_id
+    ):
+        compressor = state.active_compressor
+    elif (
+        state.last_compressor is not None
+        and notif.compressor_id == state.last_compressor.dictionary_id
+    ):
+        compressor = state.last_compressor
+    elif notif.compressor_id != 0:
+        raise ValueError("unknown compressor id")
+
+    if compressor is None:
+        notif.body.seek(0)
+        result = await handle_trusted_notify(
+            notif.topic,
+            notif.body,
+            config=state.broadcaster_config,
+            session=state.client_session,
+            content_length=notif.compressed_length,
+            sha512=notif.compressed_sha512,
+        )
+        if result.type == TrustedNotifyResultType.UNAVAILABLE:
+            raise ValueError("could not attempt all subscribers")
+
+        ack_message = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
+            headers=[
+                ("x-identifier", notif.identifier),
+                (
+                    "x-subscribers",
+                    result.succeeded.to_bytes(
+                        _smallest_unsigned_size(result.succeeded), "big"
+                    ),
+                ),
+            ],
+            body=b"",
+        )
+        if state.send_task is None:
+            state.send_task = asyncio.create_task(
+                state.websocket.send_bytes(ack_message)
+            )
+        else:
+            state.pending_sends.append(
+                _FormattedMessage(
+                    type=_MessageType.FORMATTED, websocket_data=ack_message
+                )
+            )
+        notif.body.close()
+        state.incoming_notification = None
+        return
+
+    if compressor.type == _CompressorState.PREPARING:
+        compressor = await compressor.task
+
+    notif.body.seek(0)
+    with tempfile.SpooledTemporaryFile(
+        max_size=state.broadcaster_config.message_body_spool_size
+    ) as target:
+        decompressed_hasher = hashlib.sha512()
+
+        with compressor.decompressor.stream_reader(
+            cast(IO[bytes], notif.body), read_size=io.DEFAULT_BUFFER_SIZE
+        ) as decompressor:
+            while True:
+                chunk = decompressor.read(io.DEFAULT_BUFFER_SIZE)
+                if not chunk:
+                    break
+
+                decompressed_hasher.update(chunk)
+                target.write(chunk)
+                if target.tell() > notif.deflated_length:
+                    raise ValueError("decompresses to larger than indicated")
+
+                await asyncio.sleep(0)
+
+        notif.body.close()
+
+        if target.tell() != notif.deflated_length:
+            raise ValueError("decompresses to less than indicated")
+
+        decompressed_sha512 = decompressed_hasher.digest()
+
+        target.seek(0)
+
+        result = await handle_trusted_notify(
+            notif.topic,
+            target,
+            config=state.broadcaster_config,
+            session=state.client_session,
+            content_length=notif.deflated_length,
+            sha512=decompressed_sha512,
+        )
+
+        if result.type == TrustedNotifyResultType.UNAVAILABLE:
+            raise ValueError("failed to attempt all subscribers")
+
+        ack_message = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
+            headers=[
+                ("x-identifier", notif.identifier),
+                (
+                    "x-subscribers",
+                    result.succeeded.to_bytes(
+                        _smallest_unsigned_size(result.succeeded), "big"
+                    ),
+                ),
+            ],
+            body=b"",
+        )
+        if state.send_task is None:
+            state.send_task = asyncio.create_task(
+                state.websocket.send_bytes(ack_message)
+            )
+        else:
+            state.pending_sends.append(
+                _FormattedMessage(
+                    type=_MessageType.FORMATTED, websocket_data=ack_message
+                )
+            )
+        state.incoming_notification = None
+
+
+_PROCESSOR_BY_TYPE: Dict[
+    _ParsedWSMessageType,
+    Callable[[_StateOpen, _ParsedWSMessage], Coroutine[None, None, None]],
+] = {
+    _ParsedWSMessageType.CONFIGURE: _process_configure,
+    _ParsedWSMessageType.SUBSCRIBE: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.UNSUBSCRIBE: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.NOTIFY: _process_notify,
+    _ParsedWSMessageType.NOTIFY_STREAM: _process_notify_stream,
+}
+
+
+def _process_message_asap(state: _StateOpen, message: _ParsedWSMessage) -> None:
+    if state.process_task is not None:
+        state.unprocessed_receives.append(message)
+        return
+
+    state.process_task = asyncio.create_task(
+        _PROCESSOR_BY_TYPE[message.type](state, message)
+    )
+
+
 async def _handle_open(state: _State) -> _State:
     assert state.type == _StateType.OPEN
     try:
@@ -1227,9 +1917,18 @@ async def _handle_open(state: _State) -> _State:
 
             return state
 
+        if state.process_task is None and state.unprocessed_receives:
+            _process_message_asap(state, state.unprocessed_receives.popleft())
+            return state
+
         if state.send_task is not None and state.send_task.done():
             state.send_task.result()
             state.send_task = None
+            return state
+
+        if state.process_task is not None and state.process_task.done():
+            state.process_task.result()
+            state.process_task = None
             return state
 
         if (
@@ -1238,7 +1937,7 @@ async def _handle_open(state: _State) -> _State:
             and state.active_compressor.task.done()
         ):
             state.active_compressor = state.active_compressor.task.result()
-            return state
+            return await _acknowledge_compressor_ready(state, state.active_compressor)
 
         if state.message_task.done():
             msg = state.message_task.result()
@@ -1271,6 +1970,8 @@ async def _handle_open(state: _State) -> _State:
             and state.last_compressor.task.done()
         ):
             state.last_compressor = state.last_compressor.task.result()
+            # we purposely don't acknowledge this compressor to avoid confusing the order
+            # on the client
             return state
 
         if state.read_task.done():
@@ -1285,431 +1986,8 @@ async def _handle_open(state: _State) -> _State:
 
             raw_message = cast(WSMessageBytes, raw_message)
             parsed_message = _parse_websocket_message(raw_message["bytes"])
-
-            if parsed_message.type == _ParsedWSMessageType.CONFIGURE:
-                if state.socket_level_config is not None:
-                    return await _cleanup_open(
-                        state, ValueError("configuration already set")
-                    )
-                rdr = io.BytesIO(parsed_message.body)
-                subscriber_nonce = read_exact(rdr, 32)
-                flags = _ConfigurationFlags(int.from_bytes(read_exact(rdr, 4), "big"))
-                dictionary_id = int.from_bytes(read_exact(rdr, 2), "big")
-
-                broadcaster_nonce = secrets.token_bytes(32)
-                connection_nonce = hashlib.sha256(
-                    subscriber_nonce + broadcaster_nonce
-                ).digest()
-                state.socket_level_config = _Configuration(
-                    flags=flags,
-                    dictionary_id=dictionary_id,
-                    nonce_b64=base64.urlsafe_b64encode(connection_nonce).decode(
-                        "ascii"
-                    ),
-                )
-
-                if (
-                    ((flags & _ConfigurationFlags.ZSTD_ENABLED) == 0)
-                    or ((flags & _ConfigurationFlags.ZSTD_TRAINING_ALLOWED) == 0)
-                ) and state.training_data is not None:
-                    if (
-                        state.training_data.type
-                        == _CompressorTrainingInfoType.BEFORE_LOW_WATERMARK
-                    ):
-                        state.training_data.collector.tmpfile.close()
-                    if (
-                        state.training_data.type
-                        == _CompressorTrainingInfoType.BEFORE_HIGH_WATERMARK
-                    ):
-                        state.training_data.collector.tmpfile.close()
-                    state.training_data = None
-
-                if (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0:
-                    state.standard_compressor = _CompressorReady(
-                        type=_CompressorState.READY,
-                        dictionary_id=1,
-                        level=3,
-                        data=None,
-                        compressor=zstandard.ZstdCompressor(
-                            level=3,
-                            write_checksum=False,
-                            write_content_size=False,
-                            write_dict_id=False,
-                        ),
-                        decompressor=zstandard.ZstdDecompressor(
-                            max_window_size=state.broadcaster_config.decompression_max_window_size
-                        ),
-                    )
-
-                if (
-                    dictionary_id != 0  # "no compression"
-                    and dictionary_id != 1  # reserved for not using a dictionary
-                    and (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0
-                    and state.broadcaster_config.compression_allowed
-                    and (
-                        state.active_compressor is None
-                        or dictionary_id != state.active_compressor.dictionary_id
-                    )
-                ):
-                    requested = (
-                        await state.broadcaster_config.get_compression_dictionary_by_id(
-                            dictionary_id
-                        )
-                    )
-                    if requested is None:
-                        return await _cleanup_open(
-                            state, ValueError("dictionary not found")
-                        )
-
-                    zdict, level = requested
-
-                    _rotate_compressor(
-                        state,
-                        _CompressorReady(
-                            type=_CompressorState.READY,
-                            dictionary_id=dictionary_id,
-                            level=level,
-                            data=zdict,
-                            compressor=zstandard.ZstdCompressor(
-                                level=level,
-                                dict_data=zdict,
-                                write_checksum=False,
-                                write_content_size=False,
-                                write_dict_id=False,
-                            ),
-                            decompressor=zstandard.ZstdDecompressor(
-                                dict_data=zdict,
-                                max_window_size=state.broadcaster_config.decompression_max_window_size,
-                            ),
-                        ),
-                    )
-
-                    state.pending_sends.append(
-                        _FormattedMessage(
-                            type=_MessageType.FORMATTED,
-                            websocket_data=_make_websocket_message(
-                                parsed_message.flags,
-                                _OutgoingParsedWSMessageType.ENABLE_ZSTD_PRESET,
-                                [
-                                    ("x-identifier", dictionary_id.to_bytes(2, "big")),
-                                    ("x-compression-level", level.to_bytes(2, "big")),
-                                ],
-                                b"",
-                            ),
-                        )
-                    )
-
-                state.read_task = _make_websocket_read_task(state.websocket)
-
-                state.pending_sends.append(
-                    _FormattedMessage(
-                        type=_MessageType.FORMATTED,
-                        websocket_data=_make_websocket_message(
-                            parsed_message.flags,
-                            _OutgoingParsedWSMessageType.CONFIRM_CONFIGURE,
-                            [("x-broadcaster-nonce", broadcaster_nonce)],
-                            b"",
-                        ),
-                    )
-                )
-                return state
-            elif (
-                parsed_message.type == _ParsedWSMessageType.SUBSCRIBE
-                or parsed_message.type == _ParsedWSMessageType.UNSUBSCRIBE
-            ):
-                try:
-                    payload = parse_subscribe_payload(io.BytesIO(parsed_message.body))
-                except ValueError:
-                    return await _cleanup_open(
-                        state, ValueError("invalid subscribe payload")
-                    )
-
-                authorization_bytes = parsed_message.headers.get("authorization")
-                authorization = (
-                    None
-                    if authorization_bytes is None
-                    else authorization_bytes.decode("utf-8")
-                )
-                url = _make_for_receive_websocket_url_and_change_counter(state)
-                if payload.url != url:
-                    return await _cleanup_open(
-                        state, ValueError("unexpected url target for subscribe")
-                    )
-
-                auth_at = time.time()
-                if payload.type == SubscribeType.EXACT:
-                    auth_result = (
-                        await state.broadcaster_config.is_subscribe_exact_allowed(
-                            url=url,
-                            exact=payload.topic,
-                            now=auth_at,
-                            authorization=authorization,
-                        )
-                    )
-                else:
-                    auth_result = (
-                        await state.broadcaster_config.is_subscribe_glob_allowed(
-                            url=url,
-                            glob=payload.glob,
-                            now=auth_at,
-                            authorization=authorization,
-                        )
-                    )
-
-                if auth_result != "ok":
-                    return await _cleanup_open(state, Exception(auth_result))
-
-                if payload.type == SubscribeType.EXACT:
-                    if parsed_message.type == _ParsedWSMessageType.SUBSCRIBE:
-                        if payload.topic in state.my_receiver.exact_subscriptions:
-                            return await _cleanup_open(
-                                state,
-                                Exception(f"already subscribed to {payload.topic!r}"),
-                            )
-
-                        state.my_receiver.exact_subscriptions.add(payload.topic)
-                        await state.receiver.increment_exact(payload.topic)
-                        response = _make_websocket_message(
-                            flags=parsed_message.flags,
-                            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_EXACT,
-                            headers=[("x-topic", payload.topic)],
-                            body=b"",
-                        )
-                    else:
-                        try:
-                            state.my_receiver.exact_subscriptions.remove(payload.topic)
-                        except KeyError:
-                            return await _cleanup_open(
-                                state, Exception(f"not subscribed to {payload.topic!r}")
-                            )
-
-                        await state.receiver.decrement_exact(payload.topic)
-                        response = _make_websocket_message(
-                            flags=parsed_message.flags,
-                            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
-                            headers=[("x-topic", payload.topic)],
-                            body=b"",
-                        )
-                else:
-                    if parsed_message.type == _ParsedWSMessageType.SUBSCRIBE:
-                        if any(
-                            payload.glob == glob
-                            for _, glob in state.my_receiver.glob_subscriptions
-                        ):
-                            return await _cleanup_open(
-                                state,
-                                Exception(f"already subscribed to {payload.glob}"),
-                            )
-
-                        glob_regex = re.compile(translate(payload.glob))
-                        state.my_receiver.glob_subscriptions.append(
-                            (glob_regex, payload.glob)
-                        )
-                        await state.receiver.increment_glob(payload.glob)
-                        response = _make_websocket_message(
-                            flags=parsed_message.flags,
-                            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
-                            headers=[("x-glob", payload.glob.encode("utf-8"))],
-                            body=b"",
-                        )
-                    else:
-                        subscription_idx: Optional[int] = None
-                        for idx, (_, glob) in enumerate(
-                            state.my_receiver.glob_subscriptions
-                        ):
-                            if glob == payload.glob:
-                                subscription_idx = idx
-                                break
-
-                        if subscription_idx is None:
-                            return await _cleanup_open(
-                                state, Exception(f"not subscribed to {payload.glob}")
-                            )
-
-                        state.my_receiver.glob_subscriptions.pop(subscription_idx)
-                        await state.receiver.decrement_glob(payload.glob)
-                        response = _make_websocket_message(
-                            flags=parsed_message.flags,
-                            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
-                            headers=[("x-glob", payload.glob.encode("utf-8"))],
-                            body=b"",
-                        )
-
-                if state.send_task is None:
-                    state.send_task = asyncio.create_task(
-                        state.websocket.send_bytes(response)
-                    )
-                else:
-                    state.pending_sends.append(
-                        _FormattedMessage(
-                            type=_MessageType.FORMATTED, websocket_data=response
-                        )
-                    )
-                return state
-            elif parsed_message.type == _ParsedWSMessageType.NOTIFY:
-                if state.socket_level_config is None:
-                    return await _cleanup_open(
-                        state, Exception("notify before configure")
-                    )
-                compressor_id_bytes = parsed_message.headers.get(
-                    "x-compressor", b"\x00"
-                )
-                if len(compressor_id_bytes) > 8:
-                    return await _cleanup_open(
-                        state, ValueError("x-compressor max 8 bytes")
-                    )
-
-                message_id = parsed_message.headers["x-identifier"]
-                if len(message_id) > 64:
-                    return await _cleanup_open(
-                        state, ValueError("x-identifier max 64 bytes")
-                    )
-                compressor_id = int.from_bytes(compressor_id_bytes, "big")
-
-                if compressor_id != 0 and (
-                    not state.broadcaster_config.compression_allowed
-                    or (
-                        state.socket_level_config.flags
-                        & _ConfigurationFlags.ZSTD_ENABLED
-                    )
-                    == 0
-                ):
-                    return await _cleanup_open(
-                        state, ValueError("compression disabled but used")
-                    )
-
-                body_io = io.BytesIO(parsed_message.body)
-                topic_length = int.from_bytes(read_exact(body_io, 2), "big")
-                topic = read_exact(body_io, topic_length)
-                compressed_sha512 = read_exact(body_io, 64)
-
-                authorization_bytes = parsed_message.headers.get("authorization")
-                authorization = (
-                    None
-                    if authorization_bytes is None
-                    else authorization_bytes.decode("utf-8")
-                )
-                auth_result = await state.broadcaster_config.is_notify_allowed(
-                    topic=topic,
-                    message_sha512=compressed_sha512,
-                    now=time.time(),
-                    authorization=authorization,
-                )
-                if auth_result != "ok":
-                    return await _cleanup_open(state, Exception(auth_result))
-
-                compressed_length = int.from_bytes(read_exact(body_io, 8), "big")
-                compressed_data = read_exact(body_io, compressed_length)
-
-                real_compressed_sha512 = hashlib.sha512(compressed_data).digest()
-                if real_compressed_sha512 != compressed_sha512:
-                    return await _cleanup_open(
-                        state, Exception("integrity check failed")
-                    )
-
-                decompressor: Optional[_Compressor]
-                if compressor_id == 0:
-                    decompressor = None
-                elif (
-                    state.standard_compressor is not None
-                    and compressor_id == state.standard_compressor.dictionary_id
-                ):
-                    decompressor = state.standard_compressor
-                elif (
-                    state.active_compressor is not None
-                    and compressor_id == state.active_compressor.dictionary_id
-                ):
-                    decompressor = state.active_compressor
-                elif (
-                    state.last_compressor is not None
-                    and compressor_id == state.last_compressor.dictionary_id
-                ):
-                    decompressor = state.last_compressor
-                else:
-                    return await _cleanup_open(
-                        state, ValueError("unrecognized compressor id")
-                    )
-
-                decompressed_data: Optional[SyncIOBaseLikeIO] = None
-                if decompressor is None:
-                    decompressed_data = io.BytesIO(compressed_data)
-                    decompressed_sha512 = hashlib.sha512(compressed_data).digest()
-                    decompressed_length = len(compressed_data)
-                else:
-                    if decompressor.type == _CompressorState.PREPARING:
-                        decompressor = await decompressor.task
-
-                    unseekable_decompressed_data = (
-                        decompressor.decompressor.stream_reader(compressed_data)
-                    )
-                    decompressed_hasher = hashlib.sha512()
-                    try:
-                        decompressed_data = tempfile.SpooledTemporaryFile(
-                            max_size=state.broadcaster_config.message_body_spool_size
-                        )
-                        while True:
-                            chunk = unseekable_decompressed_data.read(
-                                io.DEFAULT_BUFFER_SIZE
-                            )
-                            if not chunk:
-                                break
-                            decompressed_data.write(chunk)
-                            decompressed_hasher.update(chunk)
-                            await asyncio.sleep(0)
-                        decompressed_sha512 = decompressed_hasher.digest()
-                        decompressed_length = decompressed_data.tell()
-                        decompressed_data.seek(0)
-                    except BaseException:
-                        if decompressed_data is not None:
-                            decompressed_data.close()
-                        raise
-                    finally:
-                        unseekable_decompressed_data.close()
-
-                try:
-                    notify_result = await handle_trusted_notify(
-                        topic,
-                        decompressed_data,
-                        config=state.broadcaster_config,
-                        session=state.client_session,
-                        content_length=decompressed_length,
-                        sha512=decompressed_sha512,
-                    )
-                finally:
-                    decompressed_data.close()
-
-                if notify_result.type == TrustedNotifyResultType.UNAVAILABLE:
-                    return await _cleanup_open(
-                        state, Exception("failed to attempt all subscribers")
-                    )
-
-                to_send = _make_websocket_message(
-                    parsed_message.flags,
-                    _OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
-                    [
-                        ("x-identifier", message_id),
-                        (
-                            "x-subscribers",
-                            notify_result.succeeded.to_bytes(
-                                _smallest_unsigned_size(notify_result.succeeded), "big"
-                            ),
-                        ),
-                    ],
-                    b"",
-                )
-
-                if state.send_task is None:
-                    state.send_task = asyncio.create_task(
-                        state.websocket.send_bytes(to_send)
-                    )
-                else:
-                    state.pending_sends.append(
-                        _FormattedMessage(
-                            type=_MessageType.FORMATTED, websocket_data=to_send
-                        )
-                    )
-            else:
-                raise NotImplementedError
+            _process_message_asap(state, parsed_message)
+            return state
 
         if state.training_data is not None and state.training_data.dirty:
             return await _check_training_data(state)
@@ -1760,6 +2038,8 @@ async def _cleanup_open(
     state.message_task.cancel()
     if state.send_task is not None:
         state.send_task.cancel()
+    if state.process_task is not None:
+        state.process_task.cancel()
     if (
         state.active_compressor is not None
         and state.active_compressor.type == _CompressorState.PREPARING
@@ -1770,6 +2050,8 @@ async def _cleanup_open(
         and state.last_compressor.type == _CompressorState.PREPARING
     ):
         state.last_compressor.task.cancel()
+    if state.incoming_notification is not None:
+        state.incoming_notification.body.close()
 
     for task in state.backgrounded:
         task.cancel()
@@ -1930,6 +2212,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         headers:
             - authorization (url: websocket:<nonce>:<ctr>, see below)
+            - x-identifier identifies the notify whose compressed body is being appended. arbitrary blob, max 64 bytes
             - x-part-id starts at 0 and increments by 1 for each part. interpreted unsigned, big-endian, max 8 bytes
             - x-topic iff x-part-id is 0, the topic of the notification
             - x-compressor iff x-part-id is 0, either 0 for no compression, 1
@@ -1939,7 +2222,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             - x-compressed-length iff x-part-id is 0, the total length of the compressed body, big-endian, unsigned, max 8 bytes
             - x-deflated-length iff x-part-id is 0, the total length of the deflated body, big-endian, unsigned, max 8 bytes
             - x-compressed-sha512 iff x-part-id is 0, the sha-512 hash of the compressed content once all parts are concatenated, 64 bytes
-            - x-identifier identifies the notify whose compressed body is being appended. arbitrary blob, max 64 bytes
 
         body:
             - blob of data to append to the compressed notification body

@@ -174,6 +174,14 @@ class GenericConfig(Protocol):
         """
 
     @property
+    def websocket_max_unprocessed_receives(self) -> Optional[int]:
+        """The maximum number of unprocessed received websocket messages before we disconnect
+        the websocket forcibly. Note that this does not include any websocket messages buffered
+        above us (such as in the ASGI server). This is primarily intended to help improve recovery
+        when the broadcaster cannot keep up by resetting connections we are very far behind on
+        """
+
+    @property
     def websocket_large_direct_send_timeout(self) -> Optional[float]:
         """How long we are willing to wait for a websocket.send to complete while holding
         an exclusive file handle to the message being sent before copying the remainder of
@@ -197,6 +205,7 @@ class GenericConfigFromValues:
         outgoing_http_timeout_sock_connect: Optional[float],
         websocket_accept_timeout: Optional[float],
         websocket_max_pending_sends: Optional[int],
+        websocket_max_unprocessed_receives: Optional[int],
         websocket_large_direct_send_timeout: Optional[float],
     ):
         self.message_body_spool_size = message_body_spool_size
@@ -206,6 +215,7 @@ class GenericConfigFromValues:
         self.outgoing_http_timeout_sock_connect = outgoing_http_timeout_sock_connect
         self.websocket_accept_timeout = websocket_accept_timeout
         self.websocket_max_pending_sends = websocket_max_pending_sends
+        self.websocket_max_unprocessed_receives = websocket_max_unprocessed_receives
         self.websocket_large_direct_send_timeout = websocket_large_direct_send_timeout
 
 
@@ -586,6 +596,10 @@ class ConfigFromParts:
     @property
     def websocket_max_pending_sends(self) -> Optional[int]:
         return self.generic.websocket_max_pending_sends
+
+    @property
+    def websocket_max_unprocessed_receives(self) -> Optional[int]:
+        return self.generic.websocket_max_unprocessed_receives
 
     @property
     def websocket_large_direct_send_timeout(self) -> Optional[float]:
