@@ -386,7 +386,7 @@ class _ReceivingNotify:
     deflated_length: int
     compressed_sha512: bytes
 
-    body_hasher: hashlib._Hash
+    body_hasher: "hashlib._Hash"
     body: SyncIOBaseLikeIO
 
 
