@@ -73,26 +73,28 @@ class _ParsedWSMessageFlags(IntFlag):
 
 
 class _ParsedWSMessageType(IntEnum):
-    CONFIGURE = 0
-    SUBSCRIBE = 1
-    UNSUBSCRIBE = 2
-    NOTIFY = 3
-    NOTIFY_STREAM = 4
-    CONTINUE_RECEIVE = 5
-    CONFIRM_RECEIVE = 6
+    CONFIGURE = auto()
+    SUBSCRIBE_EXACT = auto()
+    SUBSCRIBE_GLOB = auto()
+    UNSUBSCRIBE_EXACT = auto()
+    UNSUBSCRIBE_GLOB = auto()
+    NOTIFY = auto()
+    NOTIFY_STREAM = auto()
+    CONTINUE_RECEIVE = auto()
+    CONFIRM_RECEIVE = auto()
 
 
 class _OutgoingParsedWSMessageType(IntEnum):
-    CONFIRM_CONFIGURE = 0
-    CONFIRM_SUBSCRIBE_EXACT = 1
-    CONFIRM_SUBSCRIBE_GLOB = 2
-    CONFIRM_UNSUBSCRIBE_EXACT = 3
-    CONFIRM_UNSUBSCRIBE_GLOB = 4
-    CONFIRM_NOTIFY = 5
-    CONTINUE_NOTIFY = 6
-    RECEIVE_STREAM = 7
-    ENABLE_ZSTD_PRESET = 100
-    ENABLE_ZSTD_CUSTOM = 101
+    CONFIRM_CONFIGURE = auto()
+    CONFIRM_SUBSCRIBE_EXACT = auto()
+    CONFIRM_SUBSCRIBE_GLOB = auto()
+    CONFIRM_UNSUBSCRIBE_EXACT = auto()
+    CONFIRM_UNSUBSCRIBE_GLOB = auto()
+    CONFIRM_NOTIFY = auto()
+    CONTINUE_NOTIFY = auto()
+    RECEIVE_STREAM = auto()
+    ENABLE_ZSTD_PRESET = auto()
+    ENABLE_ZSTD_CUSTOM = auto()
 
 
 @dataclass
@@ -126,8 +128,10 @@ _STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
         "x-enable-training",
         "x-initial-dict",
     ],
-    _ParsedWSMessageType.SUBSCRIBE: ["authorization"],
-    _ParsedWSMessageType.UNSUBSCRIBE: ["authorization"],
+    _ParsedWSMessageType.SUBSCRIBE_EXACT: ["authorization", "x-topic"],
+    _ParsedWSMessageType.SUBSCRIBE_GLOB: ["authorization", "x-glob"],
+    _ParsedWSMessageType.UNSUBSCRIBE_EXACT: ["authorization", "x-topic"],
+    _ParsedWSMessageType.UNSUBSCRIBE_GLOB: ["authorization", "x-glob"],
     _ParsedWSMessageType.NOTIFY: ["authorization", "x-identifier", "x-compressor"],
     _ParsedWSMessageType.CONTINUE_RECEIVE: ["x-part-id", "x-identifier"],
     _ParsedWSMessageType.CONFIRM_RECEIVE: ["x-identifier"],
@@ -1556,31 +1560,37 @@ async def _process_subscribe_or_unsubscribe(
     state: _StateOpen, message: _ParsedWSMessage
 ) -> None:
     assert (
-        message.type == _ParsedWSMessageType.SUBSCRIBE
-        or message.type == _ParsedWSMessageType.UNSUBSCRIBE
+        message.type == _ParsedWSMessageType.SUBSCRIBE_EXACT
+        or message.type == _ParsedWSMessageType.UNSUBSCRIBE_EXACT
+        or message.type == _ParsedWSMessageType.SUBSCRIBE_GLOB
+        or message.type == _ParsedWSMessageType.UNSUBSCRIBE_GLOB
     )
-    payload = parse_subscribe_payload(io.BytesIO(message.body))
 
     authorization_bytes = message.headers.get("authorization")
     authorization = (
-        None if authorization_bytes is None else authorization_bytes.decode("utf-8")
+        None if not authorization_bytes else authorization_bytes.decode("utf-8")
     )
+
+    is_exact = message.type in (
+        _ParsedWSMessageType.SUBSCRIBE_EXACT,
+        _ParsedWSMessageType.UNSUBSCRIBE_EXACT,
+    )
+    target_bytes = message.headers["x-topic"] if is_exact else message.headers["x-glob"]
+
     url = _make_for_receive_websocket_url_and_change_counter(state)
-    if payload.url != url:
-        raise ValueError("unexpected url target for subscribe")
 
     auth_at = time.time()
-    if payload.type == SubscribeType.EXACT:
+    if is_exact:
         auth_result = await state.broadcaster_config.is_subscribe_exact_allowed(
             url=url,
-            exact=payload.topic,
+            exact=target_bytes,
             now=auth_at,
             authorization=authorization,
         )
     else:
         auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
             url=url,
-            glob=payload.glob,
+            glob=target_bytes.decode("utf-8"),
             now=auth_at,
             authorization=authorization,
         )
@@ -1588,66 +1598,64 @@ async def _process_subscribe_or_unsubscribe(
     if auth_result != "ok":
         raise Exception(auth_result)
 
-    if payload.type == SubscribeType.EXACT:
-        if message.type == _ParsedWSMessageType.SUBSCRIBE:
-            if payload.topic in state.my_receiver.exact_subscriptions:
-                raise Exception(f"already subscribed to {payload.topic!r}")
+    if message.type == _ParsedWSMessageType.SUBSCRIBE_EXACT:
+        if target_bytes in state.my_receiver.exact_subscriptions:
+            raise Exception(f"already subscribed to {target_bytes!r}")
 
-            state.my_receiver.exact_subscriptions.add(payload.topic)
-            await state.receiver.increment_exact(payload.topic)
-            response = _make_websocket_message(
-                flags=message.flags,
-                message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_EXACT,
-                headers=[("x-topic", payload.topic)],
-                body=b"",
-            )
-        else:
-            try:
-                state.my_receiver.exact_subscriptions.remove(payload.topic)
-            except KeyError:
-                raise Exception(f"not subscribed to {payload.topic!r}")
+        state.my_receiver.exact_subscriptions.add(target_bytes)
+        await state.receiver.increment_exact(target_bytes)
+        response = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_EXACT,
+            headers=[("x-topic", target_bytes)],
+            body=b"",
+        )
+    elif message.type == _ParsedWSMessageType.UNSUBSCRIBE_EXACT:
+        try:
+            state.my_receiver.exact_subscriptions.remove(target_bytes)
+        except KeyError:
+            raise Exception(f"not subscribed to {target_bytes!r}")
 
-            await state.receiver.decrement_exact(payload.topic)
-            response = _make_websocket_message(
-                flags=message.flags,
-                message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
-                headers=[("x-topic", payload.topic)],
-                body=b"",
-            )
+        await state.receiver.decrement_exact(target_bytes)
+        response = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
+            headers=[("x-topic", target_bytes)],
+            body=b"",
+        )
+    elif message.type == _ParsedWSMessageType.SUBSCRIBE_GLOB:
+        target_str = target_bytes.decode("utf-8")
+        if any(target_str == glob for _, glob in state.my_receiver.glob_subscriptions):
+            raise Exception(f"already subscribed to {target_str}")
+
+        glob_regex = re.compile(translate(target_str))
+        state.my_receiver.glob_subscriptions.append((glob_regex, target_str))
+        await state.receiver.increment_glob(target_str)
+        response = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
+            headers=[("x-glob", target_str.encode("utf-8"))],
+            body=b"",
+        )
     else:
-        if message.type == _ParsedWSMessageType.SUBSCRIBE:
-            if any(
-                payload.glob == glob for _, glob in state.my_receiver.glob_subscriptions
-            ):
-                raise Exception(f"already subscribed to {payload.glob}")
+        target_str = target_bytes.decode("utf-8")
+        subscription_idx: Optional[int] = None
+        for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions):
+            if glob == target_str:
+                subscription_idx = idx
+                break
 
-            glob_regex = re.compile(translate(payload.glob))
-            state.my_receiver.glob_subscriptions.append((glob_regex, payload.glob))
-            await state.receiver.increment_glob(payload.glob)
-            response = _make_websocket_message(
-                flags=message.flags,
-                message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
-                headers=[("x-glob", payload.glob.encode("utf-8"))],
-                body=b"",
-            )
-        else:
-            subscription_idx: Optional[int] = None
-            for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions):
-                if glob == payload.glob:
-                    subscription_idx = idx
-                    break
+        if subscription_idx is None:
+            raise Exception(f"not subscribed to {target_str}")
 
-            if subscription_idx is None:
-                raise Exception(f"not subscribed to {payload.glob}")
-
-            state.my_receiver.glob_subscriptions.pop(subscription_idx)
-            await state.receiver.decrement_glob(payload.glob)
-            response = _make_websocket_message(
-                flags=message.flags,
-                message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
-                headers=[("x-glob", payload.glob.encode("utf-8"))],
-                body=b"",
-            )
+        state.my_receiver.glob_subscriptions.pop(subscription_idx)
+        await state.receiver.decrement_glob(target_str)
+        response = _make_websocket_message(
+            flags=message.flags,
+            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
+            headers=[("x-glob", target_str.encode("utf-8"))],
+            body=b"",
+        )
 
     if state.send_task is None:
         state.send_task = asyncio.create_task(state.websocket.send_bytes(response))
@@ -2071,8 +2079,10 @@ _PROCESSOR_BY_TYPE: Dict[
     Callable[[_StateOpen, _ParsedWSMessage], Coroutine[None, None, None]],
 ] = {
     _ParsedWSMessageType.CONFIGURE: _process_configure,
-    _ParsedWSMessageType.SUBSCRIBE: _process_subscribe_or_unsubscribe,
-    _ParsedWSMessageType.UNSUBSCRIBE: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.SUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.UNSUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.SUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe,
+    _ParsedWSMessageType.UNSUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe,
     _ParsedWSMessageType.NOTIFY: _process_notify,
     _ParsedWSMessageType.NOTIFY_STREAM: _process_notify_stream,
 }
@@ -2426,7 +2436,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     ## Messages Sent to the Broadcaster
 
-    0: Configure:
+    1: Configure:
         configures the broadcasters behavior; may be set at most once and must be
         sent and confirmed before doing anything else if the url is relevant for
         the authorization header
@@ -2444,21 +2454,33 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         body:
             none
-    1: Subscribe:
-        subscribe to an exact topic or glob pattern
+    2: Subscribe Exact:
+        subscribe to an exact topic
 
         headers:
             - authorization (url: websocket:<nonce>:<ctr>, see below)
-        body:
-            - exact body of /v1/subscribe
-    2: Unsubscribe:
-        unsubscribe from an exact topic or glob pattern
+            - x-topic: the topic to subscribe to
+        body: none
+    3: Subscribe Glob:
+        subscribe to a glob pattern
 
         headers:
             - authorization (url: websocket:<nonce>:<ctr>, see below)
-        body:
-            - exact body of /v1/unsubscribe
-    3: Notify:
+            - x-glob: the glob pattern to subscribe to
+        body: none
+    4: Unsubscribe Exact:
+        unsubscribe from an exact topic
+
+        headers:
+            - authorization (url: websocket:<nonce>:<ctr>, see below)
+            - x-topic: the topic to unsubscribe from
+    5: Unsubscribe Glob:
+        unsubscribe from a glob pattern
+
+        headers:
+            - authorization (url: websocket:<nonce>:<ctr>, see below)
+            - x-glob: the glob pattern to unsubscribe from
+    6: Notify:
         send a notification within a single websocket message (typically, max 16MB). this
         can be suitable for arbitrary websocket sizes depending on the configuration of the
         broadcaster (e.g., uvicorn and all intermediaries might limit max ws message sizes)
@@ -2472,7 +2494,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
               when compressing, the sha512 and length must be for the compressed content
         body:
             - exact body of /v1/notify
-    4: Notify Stream:
+    7: Notify Stream:
         send a notification over multiple websocket messages. this is more likely to work on
         typical setups when the notification payload exceeds 16MB.
 
@@ -2491,7 +2513,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         body:
             - blob of data to append to the compressed notification body
-    5: Continue Receive:
+    8: Continue Receive:
         confirms that the subscriber received part of a streamed notification and needs more
 
         headers:
@@ -2499,7 +2521,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         - x-part-id: the part id that they received up to, big-endian, unsigned, max 8 bytes
 
         body: none
-    6. Confirm Receive:
+    9. Confirm Receive:
         confirms that the subscriber received a streamed notification
 
         headers:
@@ -2509,7 +2531,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
     ## Messages Sent to the Subscriber
 
-    0: Configure Confirmation:
+    1: Configure Confirmation:
         confirms we received the configuration options from the subscriber
 
         headers:
@@ -2534,35 +2556,35 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 even within a single "operation", so e.g. a Notify Stream message broken
                 into 6 parts will change the counter 6 times.
 
-    1: Subscribe Exact Confirmation:
+    2: Subscribe Exact Confirmation:
         confirms that the subscriber will receive notifications for the given topic
 
         headers:
             - x-topic: the topic that the subscriber is now subscribed to
 
         body: none
-    2. Subscribe Glob Confirmation:
+    3. Subscribe Glob Confirmation:
         confirms that the subscriber will receive notifications for the given glob pattern
 
         headers:
             - x-glob: the pattern that the subscriber is now subscribed to
 
         body: none
-    3: Unsubscribe Exact Confirmation:
+    4: Unsubscribe Exact Confirmation:
         confirms that the subscriber will no longer receive notifications for the given topic
 
         headers:
             - x-topic: the topic that the subscriber is now unsubscribed from
 
         body: none
-    4: Unsubscribe Glob Confirmation:
+    5: Unsubscribe Glob Confirmation:
         confirms that the subscriber will no longer receive notifications for the given glob pattern
 
         headers:
             - x-glob: the pattern that the subscriber is now unsubscribed from
 
         body: none
-    5: Notify Confirmation:
+    6: Notify Confirmation:
         confirms that we sent a notification to subscribers; this is also sent
         for streamed notifications after the last part was received by the broadcaster
 
@@ -2571,7 +2593,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             - x-subscribers: the number of subscribers that received the notification
 
         body: none
-    6: Notify Continue:
+    7: Notify Continue:
         confirms that we received a part of a streamed notification but need more. You
         do not need to wait for this before continuing, and should never retry WS messages
         as the underlying protocol already handles retries. to abort a send, close the WS
@@ -2582,7 +2604,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             - x-part-id: the part id that we received up to, big-endian, unsigned
 
         body: none
-    7: Receive Stream
+    8: Receive Stream
         tells the subscriber about a notification on a topic they are subscribed to, possibly
         over multiple messages
 
@@ -2600,8 +2622,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         body:
             - blob of data to append to the compressed notification body
-    8-99: Reserved
-    100: Enable zstandard compression with preset dictionary
+    9: Enable zstandard compression with preset dictionary
         configures the subscriber to expect and use a dictionary that it already has available.
         this may use precomputed dictionaries that were specified during the broadcaster's
         configuration with the assumption the subscriber has them
@@ -2620,7 +2641,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                 no upper bound. the client can use this dictionary on larger messages if it wants
 
         body: none
-    101: Enable zstandard compression with a custom dictionary
+    10: Enable zstandard compression with a custom dictionary
         configures the subscriber to use a dictionary we just trained
 
         headers:
