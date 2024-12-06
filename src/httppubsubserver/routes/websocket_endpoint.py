@@ -132,7 +132,15 @@ _STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
     _ParsedWSMessageType.SUBSCRIBE_GLOB: ["authorization", "x-glob"],
     _ParsedWSMessageType.UNSUBSCRIBE_EXACT: ["authorization", "x-topic"],
     _ParsedWSMessageType.UNSUBSCRIBE_GLOB: ["authorization", "x-glob"],
-    _ParsedWSMessageType.NOTIFY: ["authorization", "x-identifier", "x-compressor"],
+    _ParsedWSMessageType.NOTIFY: [
+        "authorization",
+        "x-identifier",
+        "x-topic",
+        "x-compressor",
+        "x-compressed-length",
+        "x-decompressed-length",
+        "x-compressed-sha512",
+    ],
     _ParsedWSMessageType.CONTINUE_RECEIVE: ["x-part-id", "x-identifier"],
     _ParsedWSMessageType.CONFIRM_RECEIVE: ["x-identifier"],
 }
@@ -168,7 +176,7 @@ def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
                     "x-topic",
                     "x-compressor",
                     "x-compressed-length",
-                    "x-deflated-length",
+                    "x-decompressed-length",
                     "x-compressed-sha512",
                 ]
             else:
@@ -410,7 +418,7 @@ class _ReceivingNotify:
     topic: bytes
     compressor_id: int
     compressed_length: int
-    deflated_length: int
+    decompressed_length: int
     compressed_sha512: bytes
 
     body_hasher: "hashlib._Hash"
@@ -830,7 +838,7 @@ async def _make_receive_stream_message_prefix(
     part_id: int,
     dictionary_id: int,
     compressed_length: int,
-    deflated_length: int,
+    decompressed_length: int,
 ) -> bytes:
     authorization = await state.broadcaster_config.setup_authorization(
         url=_make_for_send_websocket_url_and_change_counter(state),
@@ -872,9 +880,9 @@ async def _make_receive_stream_message_prefix(
                         ),
                     ),
                     (
-                        "x-deflated-length",
-                        deflated_length.to_bytes(
-                            _smallest_unsigned_size(deflated_length),
+                        "x-decompressed-length",
+                        decompressed_length.to_bytes(
+                            _smallest_unsigned_size(decompressed_length),
                             "big",
                         ),
                     ),
@@ -1279,7 +1287,7 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
     part_id = 0
 
     compressor_id: int = 0
-    deflated_length = len(remaining)
+    decompressed_length = len(remaining)
     compressed_sha512 = msg.sha512
 
     if (
@@ -1311,7 +1319,7 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
             part_id,
             compressor_id,
             compressed_length,
-            deflated_length,
+            decompressed_length,
         )
 
         remaining_space = (
@@ -1670,13 +1678,20 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
     if state.socket_level_config is None:
         raise Exception("notify before configure")
 
-    compressor_id_bytes = message.headers.get("x-compressor", b"\x00")
-    if len(compressor_id_bytes) > 8:
-        raise ValueError("x-compressor max 8 bytes")
+    authorization_bytes = message.headers.get("authorization")
+    authorization = (
+        None if not authorization_bytes else authorization_bytes.decode("utf-8")
+    )
 
     message_id = message.headers["x-identifier"]
     if len(message_id) > 64:
         raise ValueError("x-identifier max 64 bytes")
+
+    topic = message.headers["x-topic"]
+
+    compressor_id_bytes = message.headers.get("x-compressor", b"\x00")
+    if len(compressor_id_bytes) > 8:
+        raise ValueError("x-compressor max 8 bytes")
 
     compressor_id = int.from_bytes(compressor_id_bytes, "big")
 
@@ -1686,15 +1701,22 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
     ):
         raise ValueError("compression used but compression is forbidden")
 
-    body_io = io.BytesIO(message.body)
-    topic_length = int.from_bytes(read_exact(body_io, 2), "big")
-    topic = read_exact(body_io, topic_length)
-    compressed_sha512 = read_exact(body_io, 64)
+    compressed_length_bytes = message.headers["x-compressed-length"]
+    if len(compressed_length_bytes) > 8:
+        raise ValueError("compressed length max 8 bytes")
 
-    authorization_bytes = message.headers.get("authorization")
-    authorization = (
-        None if authorization_bytes is None else authorization_bytes.decode("utf-8")
-    )
+    compressed_length = int.from_bytes(compressed_length_bytes, "big")
+
+    decompressed_length_bytes = message.headers["x-decompressed-length"]
+    if len(decompressed_length_bytes) > 8:
+        raise ValueError("decompressed length max 8 bytes")
+
+    decompressed_length = int.from_bytes(decompressed_length_bytes, "big")
+
+    compressed_sha512 = message.headers["x-compressed-sha512"]
+    if len(compressed_sha512) != 64:
+        raise ValueError("compressed sha512 must be 64 bytes")
+
     auth_result = await state.broadcaster_config.is_notify_allowed(
         topic=topic,
         message_sha512=compressed_sha512,
@@ -1704,10 +1726,10 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
     if auth_result != "ok":
         raise Exception(auth_result)
 
-    compressed_length = int.from_bytes(read_exact(body_io, 8), "big")
-    compressed_data = read_exact(body_io, compressed_length)
+    if len(message.body) != compressed_length:
+        raise ValueError("compressed length is incorrect")
 
-    real_compressed_sha512 = hashlib.sha512(compressed_data).digest()
+    real_compressed_sha512 = hashlib.sha512(message.body).digest()
     if real_compressed_sha512 != compressed_sha512:
         raise Exception("integrity check failed")
 
@@ -1734,16 +1756,17 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
 
     decompressed_data: Optional[SyncIOBaseLikeIO] = None
     if decompressor is None:
-        _store_small_for_compression_training(state, compressed_data)
-        decompressed_data = io.BytesIO(compressed_data)
-        decompressed_sha512 = hashlib.sha512(compressed_data).digest()
-        decompressed_length = len(compressed_data)
+        _store_small_for_compression_training(state, message.body)
+        decompressed_data = io.BytesIO(message.body)
+        decompressed_sha512 = real_compressed_sha512
+        if len(message.body) != decompressed_length:
+            raise ValueError("decompressed length is incorrect")
     else:
         if decompressor.type == _CompressorState.PREPARING:
             decompressor = await decompressor.task
 
         unseekable_decompressed_data = decompressor.decompressor.stream_reader(
-            compressed_data
+            message.body
         )
         decompressed_hasher = hashlib.sha512()
         try:
@@ -1758,7 +1781,8 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
                 decompressed_hasher.update(chunk)
                 await asyncio.sleep(0)
             decompressed_sha512 = decompressed_hasher.digest()
-            decompressed_length = decompressed_data.tell()
+            if decompressed_data.tell() != decompressed_length:
+                raise ValueError("decompressed length is incorrect")
             decompressed_data.seek(0)
         except BaseException:
             if decompressed_data is not None:
@@ -1851,10 +1875,10 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
         if len(compressed_length_bytes) > 8:
             raise ValueError("compressed length max 8 bytes")
         compressed_length = int.from_bytes(compressed_length_bytes, "big")
-        deflated_length_bytes = message.headers["x-deflated-length"]
-        if len(deflated_length_bytes) > 8:
-            raise ValueError("deflated length max 8 bytes")
-        deflated_length = int.from_bytes(deflated_length_bytes, "big")
+        decompressed_length_bytes = message.headers["x-decompressed-length"]
+        if len(decompressed_length_bytes) > 8:
+            raise ValueError("decompressed length max 8 bytes")
+        decompressed_length = int.from_bytes(decompressed_length_bytes, "big")
         compressed_sha512 = message.headers["x-compressed-sha512"]
         if len(compressed_sha512) != 64:
             raise ValueError("sha512 must be exactly 64 bytes")
@@ -1865,7 +1889,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
             topic=topic,
             compressor_id=compressor_id,
             compressed_length=compressed_length,
-            deflated_length=deflated_length,
+            decompressed_length=decompressed_length,
             compressed_sha512=compressed_sha512,
             body_hasher=hashlib.sha512(),
             body=tempfile.SpooledTemporaryFile(
@@ -1945,8 +1969,10 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
 
     if compressor is None:
         notif.body.seek(0)
-        if _should_store_large_message_for_training(state, notif.deflated_length):
-            capturer = _make_store_for_training_capturer(state, notif.deflated_length)
+        if _should_store_large_message_for_training(state, notif.decompressed_length):
+            capturer = _make_store_for_training_capturer(
+                state, notif.decompressed_length
+            )
             try:
                 while True:
                     chunk = notif.body.read(io.DEFAULT_BUFFER_SIZE)
@@ -2006,7 +2032,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
     ) as target:
         decompressed_hasher = hashlib.sha512()
 
-        capturer = _make_store_for_training_capturer(state, notif.deflated_length)
+        capturer = _make_store_for_training_capturer(state, notif.decompressed_length)
         try:
             with compressor.decompressor.stream_reader(
                 cast(IO[bytes], notif.body), read_size=io.DEFAULT_BUFFER_SIZE
@@ -2019,7 +2045,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
                     decompressed_hasher.update(chunk)
                     target.write(chunk)
                     capturer.write(chunk)
-                    if target.tell() > notif.deflated_length:
+                    if target.tell() > notif.decompressed_length:
                         raise ValueError("decompresses to larger than indicated")
 
                     await asyncio.sleep(0)
@@ -2028,7 +2054,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
 
         notif.body.close()
 
-        if target.tell() != notif.deflated_length:
+        if target.tell() != notif.decompressed_length:
             raise ValueError("decompresses to less than indicated")
 
         decompressed_sha512 = decompressed_hasher.digest()
@@ -2040,7 +2066,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
             target,
             config=state.broadcaster_config,
             session=state.client_session,
-            content_length=notif.deflated_length,
+            content_length=notif.decompressed_length,
             sha512=decompressed_sha512,
         )
 
@@ -2508,7 +2534,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
               otherwise the id of the compressor from one of the
               "Enable X compression" broadcaster->subscriber messages
             - x-compressed-length iff x-part-id is 0, the total length of the compressed body, big-endian, unsigned, max 8 bytes
-            - x-deflated-length iff x-part-id is 0, the total length of the deflated body, big-endian, unsigned, max 8 bytes
+            - x-decompressed-length iff x-part-id is 0, the total length of the decompressed body, big-endian, unsigned, max 8 bytes
             - x-compressed-sha512 iff x-part-id is 0, the sha-512 hash of the compressed content once all parts are concatenated, 64 bytes
 
         body:
@@ -2617,7 +2643,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
               otherwise the id of the compressor from one of
               the "Enable X compression" broadcaster->subscriber messages
             - x-compressed-length iff x-part-id is 0, the total length of the compressed body, big-endian, unsigned, max 8 bytes
-            - x-deflated-length iff x-part-id is 0, the total length of the deflated body, big-endian, unsigned, max 8 bytes
+            - x-decompressed-length iff x-part-id is 0, the total length of the decompressed body, big-endian, unsigned, max 8 bytes
             - x-compressed-sha512 iff x-part-id is 0, the sha-512 hash of the compressed content once all parts are concatenated, 64 bytes
 
         body:
