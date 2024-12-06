@@ -191,6 +191,17 @@ class GenericConfig(Protocol):
         A value of 0 means it must complete within one event loop
         """
 
+    @property
+    def websocket_send_max_unacknowledged(self) -> Optional[int]:
+        """The maximum number of NOTIFY/NOTIFY STREAM messages we will have outgoing before
+        waiting for them to be acknowledged by the client. This is intended to help alleviate
+        issues related to clients that cannot keep up due to processing issues rather than
+        network issues, as having full websocket buffers tends to result in a poor debugging
+        experience.
+
+        A reasonable value is 3
+        """
+
 
 class GenericConfigFromValues:
     """Convenience class that allows you to create a GenericConfig protocol
@@ -207,6 +218,7 @@ class GenericConfigFromValues:
         websocket_max_pending_sends: Optional[int],
         websocket_max_unprocessed_receives: Optional[int],
         websocket_large_direct_send_timeout: Optional[float],
+        websocket_send_max_unacknowledged: Optional[int],
     ):
         self.message_body_spool_size = message_body_spool_size
         self.outgoing_http_timeout_total = outgoing_http_timeout_total
@@ -217,6 +229,7 @@ class GenericConfigFromValues:
         self.websocket_max_pending_sends = websocket_max_pending_sends
         self.websocket_max_unprocessed_receives = websocket_max_unprocessed_receives
         self.websocket_large_direct_send_timeout = websocket_large_direct_send_timeout
+        self.websocket_send_max_unacknowledged = websocket_send_max_unacknowledged
 
 
 class CompressionConfig(Protocol):
@@ -232,8 +245,8 @@ class CompressionConfig(Protocol):
         self, dictionary_id: int, /
     ) -> "Optional[Tuple[zstandard.ZstdCompressionDict, int]]":
         """If a precomputed zstandard compression dictionary is available with the
-        given id, the bytes of the dictionary and the compression level to use
-        should be returned. If the dictionary is not available, return None.
+        given id, the dictionary and the compression level to use should be
+        returned. If the dictionary is not available, return None.
 
         This is generally only useful if you are using short-lived websocket
         connections where trained dictionaries won't kick in, or you want to go
@@ -604,6 +617,10 @@ class ConfigFromParts:
     @property
     def websocket_large_direct_send_timeout(self) -> Optional[float]:
         return self.generic.websocket_large_direct_send_timeout
+
+    @property
+    def websocket_send_max_unacknowledged(self) -> Optional[int]:
+        return self.generic.websocket_send_max_unacknowledged
 
     @property
     def compression_allowed(self) -> bool:

@@ -34,6 +34,7 @@ from httppubsubserver.routes.notify import (
     handle_trusted_notify,
 )
 from httppubsubserver.routes.subscribe import SubscribeType, parse_subscribe_payload
+from httppubsubserver.util.close_guarded_io import CloseGuardedIO
 from httppubsubserver.util.websocket_message import (
     WSMessage,
     WSMessageBytes,
@@ -44,6 +45,7 @@ from httppubsubserver.util.ws_receiver import BaseWSReceiver, FanoutWSReceiver
 from httppubsubserver.util.sync_io import (
     SyncReadableBytesIO,
     SyncIOBaseLikeIO,
+    VoidSyncIO,
     read_exact,
 )
 
@@ -76,6 +78,8 @@ class _ParsedWSMessageType(IntEnum):
     UNSUBSCRIBE = 2
     NOTIFY = 3
     NOTIFY_STREAM = 4
+    CONTINUE_RECEIVE = 5
+    CONFIRM_RECEIVE = 6
 
 
 class _OutgoingParsedWSMessageType(IntEnum):
@@ -99,11 +103,34 @@ class _ParsedWSMessage:
     body: bytes
 
 
+@dataclass
+class _ContinueReceive:
+    type: Literal[_ParsedWSMessageType.CONTINUE_RECEIVE]
+    identifier: bytes
+    part_id: int
+
+
+@dataclass
+class _ConfirmReceive:
+    type: Literal[_ParsedWSMessageType.CONFIRM_RECEIVE]
+    identifier: bytes
+
+
+_Acknowledgement = Union[_ContinueReceive, _ConfirmReceive]
+
+
 _STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
-    _ParsedWSMessageType.CONFIGURE: [],
+    _ParsedWSMessageType.CONFIGURE: [
+        "x-subscriber-nonce",
+        "x-enable-zstd",
+        "x-enable-training",
+        "x-initial-dict",
+    ],
     _ParsedWSMessageType.SUBSCRIBE: ["authorization"],
     _ParsedWSMessageType.UNSUBSCRIBE: ["authorization"],
     _ParsedWSMessageType.NOTIFY: ["authorization", "x-identifier", "x-compressor"],
+    _ParsedWSMessageType.CONTINUE_RECEIVE: ["x-part-id", "x-identifier"],
+    _ParsedWSMessageType.CONFIRM_RECEIVE: ["x-identifier"],
 }
 
 
@@ -188,14 +215,10 @@ def _make_websocket_read_task(websocket: WebSocket) -> asyncio.Task[WSMessage]:
     return cast(asyncio.Task[WSMessage], asyncio.create_task(websocket.receive()))
 
 
-class _ConfigurationFlags(IntFlag):
-    ZSTD_ENABLED = 1 << 0
-    ZSTD_TRAINING_ALLOWED = 1 << 1
-
-
 @dataclass
 class _Configuration:
-    flags: _ConfigurationFlags
+    enable_zstd: bool
+    enable_training: bool
     dictionary_id: int
     nonce_b64: str
     """The agreed upon nonce for this connection, which mixes input from the broadcaster and subscriber"""
@@ -397,7 +420,7 @@ class _StateOpen:
     broadcaster_config: Config
     receiver: FanoutWSReceiver
     client_session: aiohttp.ClientSession
-    standard_compressor: Optional[_CompressorReady]
+    standard_compressor: Optional[_Compressor]
     """The compressor when not using a custom dictionary"""
 
     socket_level_config: Optional[_Configuration]
@@ -415,7 +438,11 @@ class _StateOpen:
     When we move large messages to this queue, we spool them to file
     """
     unprocessed_receives: deque[_ParsedWSMessage]
-    """If we receive a message but can't set process_task immediately, we move it here."""
+    """If we receive a message but can't set or inform process_task immediately, we move it here, with
+    the exception of CONTINUE/CONFIRM messages, which go to unprocessed_acks.
+    """
+    expecting_acks: asyncio.Queue[_Acknowledgement]
+    """what acknowledgements we expect to receive, in the order we expect to receive them"""
     incoming_notification: Optional[_ReceivingNotify]
     """If the subscriber is streaming us a notification, the current object
     tracking the state of that stream, otherwise None to indicate no notification
@@ -485,6 +512,11 @@ async def _handle_accepting(state: _State) -> _State:
         pending_sends=deque(maxlen=state.config.websocket_max_pending_sends),
         unprocessed_receives=deque(
             maxlen=state.config.websocket_max_unprocessed_receives
+        ),
+        expecting_acks=asyncio.Queue(
+            state.config.websocket_send_max_unacknowledged
+            if state.config.websocket_send_max_unacknowledged is not None
+            else 0
         ),
         incoming_notification=None,
         active_compressor=None,
@@ -579,9 +611,7 @@ def _store_small_for_compression_training(state: _StateOpen, data: bytes) -> Non
     state.training_data.dirty = True
 
 
-def _should_store_large_message_for_training(
-    state: _StateOpen, msg: Union[_LargeMessage, _LargeSpooledMessage]
-) -> bool:
+def _should_store_large_message_for_training(state: _StateOpen, length: int) -> bool:
     """It is possible to configure us so that some messages are compressed with
     a precomputed dictionary but spooled to file... this is a pretty strange
     setup, but it may be helpful for benchmarking
@@ -589,12 +619,12 @@ def _should_store_large_message_for_training(
     if state.training_data is None:
         return False
 
-    if state.broadcaster_config.compression_trained_max_size <= msg.length:
+    if state.broadcaster_config.compression_trained_max_size <= length:
         # this data is too large to benefit from precomputing the compression dictionary
         # (this is what we expect, since we spooled to file)
         return False
 
-    if state.broadcaster_config.compression_min_size > msg.length:
+    if state.broadcaster_config.compression_min_size > length:
         # this data is too small for compression to be useful (this is absurd given we spooled)
         return False
 
@@ -603,6 +633,27 @@ def _should_store_large_message_for_training(
         return False
 
     return True
+
+
+def _make_store_for_training_capturer(
+    state: _StateOpen,
+    length: int,
+) -> SyncIOBaseLikeIO:
+    """The caller must call msg.finished.set() when they are done with the data"""
+
+    if not _should_store_large_message_for_training(state, length):
+        return VoidSyncIO()
+
+    assert state.training_data is not None
+    assert state.training_data.type != _CompressorTrainingInfoType.WAITING_TO_REFRESH
+
+    capturing_tmpfile = state.training_data.collector.tmpfile
+
+    state.training_data.collector.length += length
+    state.training_data.collector.messages += 1
+
+    capturing_tmpfile.write(length.to_bytes(4, "big"))
+    return CloseGuardedIO(capturing_tmpfile)
 
 
 async def _error_guard(task: asyncio.Task[_CompressorReady]) -> None:
@@ -844,80 +895,98 @@ async def _send_large_compressed_message_optimistically(
     handle without waiting for socket io (while still being much more efficient than if the
     copy had been done by the caller without compression)
     """
-    capturing = _should_store_large_message_for_training(state, msg)
 
-    handle_capture: Callable[[bytes], int] = lambda _: 0
+    capture_io = _make_store_for_training_capturer(state, msg.length)
+    try:
+        with tempfile.TemporaryFile("w+b", buffering=0) as compressed_file:
+            chunker = compressor.chunker(
+                size=msg.length, chunk_size=io.DEFAULT_BUFFER_SIZE
+            )
+            hasher = hashlib.sha512()
+            while True:
+                chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
+                if not chunk:
+                    break
 
-    if capturing:
+                capture_io.write(chunk)
+                for compressed_chunk in chunker.compress(chunk):
+                    compressed_file.write(compressed_chunk)
+                    hasher.update(compressed_chunk)
 
-        assert state.training_data is not None
-        assert (
-            state.training_data.type != _CompressorTrainingInfoType.WAITING_TO_REFRESH
-        )
+                await asyncio.sleep(0)
 
-        capturing_tmpfile = state.training_data.collector.tmpfile
+            msg.finished.set()
 
-        state.training_data.collector.length += msg.length
-        state.training_data.collector.messages += 1
-
-        capturing_tmpfile.write(msg.length.to_bytes(4, "big"))
-        handle_capture = capturing_tmpfile.write
-
-    with tempfile.TemporaryFile("w+b", buffering=0) as compressed_file:
-        chunker = compressor.chunker(size=msg.length, chunk_size=io.DEFAULT_BUFFER_SIZE)
-        hasher = hashlib.sha512()
-        while True:
-            chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
-            if not chunk:
-                break
-
-            handle_capture(chunk)
-            for compressed_chunk in chunker.compress(chunk):
+            for compressed_chunk in chunker.finish():
                 compressed_file.write(compressed_chunk)
                 hasher.update(compressed_chunk)
 
+            compressed_sha512 = hasher.digest()
             await asyncio.sleep(0)
 
-        msg.finished.set()
+            compressed_length = compressed_file.tell()
+            compressed_file.seek(0)
+            msg_identifier = secrets.token_bytes(4)
+            part_id = 0
 
-        for compressed_chunk in chunker.finish():
-            compressed_file.write(compressed_chunk)
-            hasher.update(compressed_chunk)
-
-        compressed_sha512 = hasher.digest()
-        await asyncio.sleep(0)
-
-        compressed_length = compressed_file.tell()
-        compressed_file.seek(0)
-        msg_identifier = secrets.token_bytes(4)
-        part_id = 0
-
-        while True:
-            headers = await _make_receive_stream_message_prefix(
-                state,
-                msg.topic,
-                compressed_sha512,
-                msg_identifier,
-                part_id,
-                compressor_id,
-                compressed_length,
-                msg.length,
-            )
-
-            remaining_space = (
-                max(
-                    512,
-                    state.broadcaster_config.outgoing_max_ws_message_size
-                    - len(headers),
+            while True:
+                headers = await _make_receive_stream_message_prefix(
+                    state,
+                    msg.topic,
+                    compressed_sha512,
+                    msg_identifier,
+                    part_id,
+                    compressor_id,
+                    compressed_length,
+                    msg.length,
                 )
-                if state.broadcaster_config.outgoing_max_ws_message_size is not None
-                else compressed_length
-            )
-            part = compressed_file.read(remaining_space)
-            if not part:
-                break
-            await state.websocket.send_bytes(headers + part)
-            part_id += 1
+
+                remaining_space = (
+                    max(
+                        512,
+                        state.broadcaster_config.outgoing_max_ws_message_size
+                        - len(headers),
+                    )
+                    if state.broadcaster_config.outgoing_max_ws_message_size is not None
+                    else compressed_length
+                )
+                part = compressed_file.read(remaining_space)
+                if not part:
+                    break
+
+                if compressed_file.tell() < compressed_length:
+                    await state.expecting_acks.put(
+                        _ContinueReceive(
+                            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
+                            identifier=msg_identifier,
+                            part_id=part_id,
+                        )
+                    )
+                else:
+                    await state.expecting_acks.put(
+                        _ConfirmReceive(
+                            type=_ParsedWSMessageType.CONFIRM_RECEIVE,
+                            identifier=msg_identifier,
+                        )
+                    )
+
+                await state.websocket.send_bytes(headers + part)
+                part_id += 1
+    finally:
+        capture_io.close()
+
+
+async def _expect_ack_and_send(
+    state: _StateOpen, identifier: bytes, part_id: int, ws_message: bytes
+) -> None:
+    await state.expecting_acks.put(
+        _ContinueReceive(
+            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
+            identifier=identifier,
+            part_id=part_id,
+        )
+    )
+    await state.websocket.send_bytes(ws_message)
 
 
 async def _send_large_message_optimistically(
@@ -928,12 +997,14 @@ async def _send_large_message_optimistically(
 
     if (
         state.broadcaster_config.compression_allowed
-        and (state.socket_level_config.flags & _ConfigurationFlags.ZSTD_ENABLED) != 0
         and msg.length >= state.broadcaster_config.compression_trained_max_size
         and state.standard_compressor is not None
     ):
+        std_compressor = state.standard_compressor
+        if std_compressor.type == _CompressorState.PREPARING:
+            std_compressor = await std_compressor.task
         return await _send_large_compressed_message_optimistically(
-            state, msg, compressor=state.standard_compressor.compressor, compressor_id=1
+            state, msg, compressor=std_compressor.compressor, compressor_id=1
         )
 
     if (
@@ -949,90 +1020,27 @@ async def _send_large_message_optimistically(
             compressor_id=state.active_compressor.dictionary_id,
         )
 
-    capturing = _should_store_large_message_for_training(state, msg)
-
-    handle_capture: Callable[[bytes], int] = lambda _: 0
-
-    if capturing:
-
-        assert state.training_data is not None
-        assert (
-            state.training_data.type != _CompressorTrainingInfoType.WAITING_TO_REFRESH
+    capture_io = _make_store_for_training_capturer(state, msg.length)
+    try:
+        spool_timeout = (
+            asyncio.create_task(
+                asyncio.sleep(
+                    state.broadcaster_config.websocket_large_direct_send_timeout
+                )
+            )
+            if state.broadcaster_config.websocket_large_direct_send_timeout is not None
+            else asyncio.Future()
         )
 
-        capturing_tmpfile = state.training_data.collector.tmpfile
-
-        state.training_data.collector.length += msg.length
-        state.training_data.collector.messages += 1
-
-        capturing_tmpfile.write(msg.length.to_bytes(4, "big"))
-        handle_capture = capturing_tmpfile.write
-
-    spool_timeout = (
-        asyncio.create_task(
-            asyncio.sleep(state.broadcaster_config.websocket_large_direct_send_timeout)
+        sender: Optional[asyncio.Task[None]] = None
+        msg_identifier = secrets.token_bytes(4)
+        part_id = 0
+        max_ws_msg_size = (
+            2**64 - 1
+            if state.broadcaster_config.outgoing_max_ws_message_size is None
+            else state.broadcaster_config.outgoing_max_ws_message_size
         )
-        if state.broadcaster_config.websocket_large_direct_send_timeout is not None
-        else asyncio.Future()
-    )
-
-    sender: Optional[asyncio.Task[None]] = None
-    msg_identifier = secrets.token_bytes(4)
-    part_id = 0
-    max_ws_msg_size = (
-        2**64 - 1
-        if state.broadcaster_config.outgoing_max_ws_message_size is None
-        else state.broadcaster_config.outgoing_max_ws_message_size
-    )
-    while True:
-        headers = await _make_receive_stream_message_prefix(
-            state,
-            msg.topic,
-            msg.sha512,
-            msg_identifier,
-            part_id,
-            0,
-            msg.length,
-            msg.length,
-        )
-
-        remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
-
-        chunk = msg.stream.read(remaining_ws_msg_space)
-        if not chunk:
-            msg.finished.set()
-            spool_timeout.cancel()
-            return
-
-        handle_capture(chunk)
-        sender = asyncio.create_task(state.websocket.send_bytes(headers + chunk))
-        part_id += 1
-        await asyncio.wait([sender, spool_timeout], return_when=asyncio.FIRST_COMPLETED)
-        if sender.done():
-            sender.result()
-            sender = None
-            continue
-
-        break
-
-    # timeout reached while sender is not done, respool the remainder so we can release the message
-    assert sender is not None, "impossible"
-
-    with tempfile.TemporaryFile("w+b", buffering=-1) as target:
-        while True:
-            chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
-            if not chunk:
-                break
-
-            handle_capture(chunk)
-            target.write(chunk)
-            await asyncio.sleep(0)
-
-        msg.finished.set()
-        target.seek(0)
-
-        await sender
-
+        sent_so_far = 0
         while True:
             headers = await _make_receive_stream_message_prefix(
                 state,
@@ -1046,12 +1054,104 @@ async def _send_large_message_optimistically(
             )
 
             remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
-            part = target.read(remaining_ws_msg_space)
-            if not part:
-                break
 
+            chunk = msg.stream.read(remaining_ws_msg_space)
+            if not chunk:
+                msg.finished.set()
+                spool_timeout.cancel()
+                return
+
+            capture_io.write(chunk)
+
+            sent_so_far += len(chunk)
+            if sent_so_far > msg.length:
+                raise ValueError("sent too much data")
+
+            if sent_so_far == msg.length:
+                msg.finished.set()
+                spool_timeout.cancel()
+                await state.expecting_acks.put(
+                    _ConfirmReceive(
+                        type=_ParsedWSMessageType.CONFIRM_RECEIVE,
+                        identifier=msg_identifier,
+                    )
+                )
+                await state.websocket.send_bytes(headers + chunk)
+                return
+
+            sender = asyncio.create_task(
+                _expect_ack_and_send(state, msg_identifier, part_id, headers + chunk)
+            )
             part_id += 1
-            await state.websocket.send_bytes(headers + part)
+            await asyncio.wait(
+                [sender, spool_timeout], return_when=asyncio.FIRST_COMPLETED
+            )
+            if sender.done():
+                sender.result()
+                sender = None
+                continue
+
+            break
+
+        # timeout reached while sender is not done, respool the remainder so we can release the message
+        assert sender is not None, "impossible"
+
+        with tempfile.TemporaryFile("w+b", buffering=-1) as target:
+            while True:
+                chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
+                if not chunk:
+                    break
+
+                capture_io.write(chunk)
+                target.write(chunk)
+                await asyncio.sleep(0)
+
+            msg.finished.set()
+            target.seek(0)
+
+            await sender
+
+            while True:
+                headers = await _make_receive_stream_message_prefix(
+                    state,
+                    msg.topic,
+                    msg.sha512,
+                    msg_identifier,
+                    part_id,
+                    0,
+                    msg.length,
+                    msg.length,
+                )
+
+                remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
+                part = target.read(remaining_ws_msg_space)
+                if not part:
+                    break
+
+                sent_so_far += len(chunk)
+                if sent_so_far > msg.length:
+                    raise ValueError("sent too much data")
+
+                if sent_so_far == msg.length:
+                    await state.expecting_acks.put(
+                        _ConfirmReceive(
+                            type=_ParsedWSMessageType.CONFIRM_RECEIVE,
+                            identifier=msg_identifier,
+                        )
+                    )
+                else:
+                    await state.expecting_acks.put(
+                        _ContinueReceive(
+                            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
+                            identifier=msg_identifier,
+                            part_id=part_id,
+                        )
+                    )
+
+                await state.websocket.send_bytes(headers + part)
+                part_id += 1
+    finally:
+        capture_io.close()
 
 
 async def _send_large_message_from_spooled(
@@ -1062,8 +1162,11 @@ async def _send_large_message_from_spooled(
         state.standard_compressor is not None
         and msg.length >= state.broadcaster_config.compression_trained_max_size
     ):
+        std_compressor = state.standard_compressor
+        if std_compressor.type == _CompressorState.PREPARING:
+            std_compressor = await std_compressor.task
         return await _send_large_compressed_message_optimistically(
-            state, msg, compressor=state.standard_compressor.compressor, compressor_id=1
+            state, msg, compressor=std_compressor.compressor, compressor_id=1
         )
 
     if (
@@ -1078,54 +1181,51 @@ async def _send_large_message_from_spooled(
             compressor_id=state.active_compressor.dictionary_id,
         )
 
-    capturing = _should_store_large_message_for_training(state, msg)
-
-    handle_capture: Callable[[bytes], int] = lambda _: 0
-
-    if capturing:
-
-        assert state.training_data is not None
-        assert (
-            state.training_data.type != _CompressorTrainingInfoType.WAITING_TO_REFRESH
+    capture_io = _make_store_for_training_capturer(state, msg.length)
+    try:
+        msg_identifier = secrets.token_bytes(4)
+        part_id = 0
+        max_ws_msg_size = (
+            2**64 - 1
+            if state.broadcaster_config.outgoing_max_ws_message_size is None
+            else state.broadcaster_config.outgoing_max_ws_message_size
         )
+        while True:
+            headers = await _make_receive_stream_message_prefix(
+                state,
+                msg.topic,
+                msg.sha512,
+                msg_identifier,
+                part_id,
+                0,
+                msg.length,
+                msg.length,
+            )
 
-        capturing_tmpfile = state.training_data.collector.tmpfile
+            remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
 
-        state.training_data.collector.length += msg.length
-        state.training_data.collector.messages += 1
+            chunk = msg.stream.read(remaining_ws_msg_space)
+            if not chunk:
+                msg.finished.set()
+                return
 
-        capturing_tmpfile.write(msg.length.to_bytes(4, "big"))
-        handle_capture = capturing_tmpfile.write
-
-    msg_identifier = secrets.token_bytes(4)
-    part_id = 0
-    max_ws_msg_size = (
-        2**64 - 1
-        if state.broadcaster_config.outgoing_max_ws_message_size is None
-        else state.broadcaster_config.outgoing_max_ws_message_size
-    )
-    while True:
-        headers = await _make_receive_stream_message_prefix(
-            state,
-            msg.topic,
-            msg.sha512,
-            msg_identifier,
-            part_id,
-            0,
-            msg.length,
-            msg.length,
-        )
-
-        remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
-
-        chunk = msg.stream.read(remaining_ws_msg_space)
-        if not chunk:
-            msg.finished.set()
-            return
-
-        handle_capture(chunk)
-        await state.websocket.send_bytes(headers + chunk)
-        part_id += 1
+            capture_io.write(chunk)
+            await state.expecting_acks.put(
+                _ContinueReceive(
+                    type=_ParsedWSMessageType.CONTINUE_RECEIVE,
+                    identifier=msg_identifier,
+                    part_id=part_id,
+                )
+                if msg.stream.tell() < msg.length
+                else _ConfirmReceive(
+                    type=_ParsedWSMessageType.CONFIRM_RECEIVE,
+                    identifier=msg_identifier,
+                )
+            )
+            await state.websocket.send_bytes(headers + chunk)
+            part_id += 1
+    finally:
+        capture_io.close()
 
 
 def _spool_large_message_immediately(
@@ -1190,6 +1290,7 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
     elif (
         len(remaining) >= state.broadcaster_config.compression_trained_max_size
         and state.standard_compressor is not None
+        and state.standard_compressor.type == _CompressorState.READY
     ):
         compressor_id = 1
         remaining = state.standard_compressor.compressor.compress(remaining)
@@ -1221,6 +1322,21 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
             remaining[:remaining_space],
             remaining[remaining_space:],
         )
+        if remaining:
+            await state.expecting_acks.put(
+                _ContinueReceive(
+                    type=_ParsedWSMessageType.CONTINUE_RECEIVE,
+                    identifier=msg_identifier,
+                    part_id=part_id,
+                )
+            )
+        else:
+            await state.expecting_acks.put(
+                _ConfirmReceive(
+                    type=_ParsedWSMessageType.CONFIRM_RECEIVE,
+                    identifier=msg_identifier,
+                )
+            )
         await state.websocket.send_bytes(headers + part)
         part_id += 1
 
@@ -1229,23 +1345,33 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
     assert message.type == _ParsedWSMessageType.CONFIGURE
     if state.socket_level_config is not None:
         raise ValueError("configuration already set")
-    rdr = io.BytesIO(message.body)
-    subscriber_nonce = read_exact(rdr, 32)
-    flags = _ConfigurationFlags(int.from_bytes(read_exact(rdr, 4), "big"))
-    dictionary_id = int.from_bytes(read_exact(rdr, 2), "big")
+
+    subscriber_nonce = message.headers["x-subscriber-nonce"]
+    if len(subscriber_nonce) != 32:
+        raise ValueError("subscriber nonce must be 32 bytes")
+
+    enable_zstd = message.headers.get("x-enable-zstd", b"\x00") == b"\x01"
+    enable_training = message.headers.get("x-enable-training", b"\x00") == b"\x01"
+    dictionary_id_bytes = message.headers.get("x-initial-dict", b"\x00")
+
+    if enable_training and not enable_zstd:
+        raise ValueError("training requires zstd")
+
+    if len(dictionary_id_bytes) > 2:
+        raise ValueError("initial dict must be at most 2 bytes")
+
+    dictionary_id = int.from_bytes(dictionary_id_bytes, "big")
 
     broadcaster_nonce = secrets.token_bytes(32)
     connection_nonce = hashlib.sha256(subscriber_nonce + broadcaster_nonce).digest()
     state.socket_level_config = _Configuration(
-        flags=flags,
+        enable_zstd=enable_zstd,
+        enable_training=enable_training,
         dictionary_id=dictionary_id,
         nonce_b64=base64.urlsafe_b64encode(connection_nonce).decode("ascii"),
     )
 
-    if (
-        ((flags & _ConfigurationFlags.ZSTD_ENABLED) == 0)
-        or ((flags & _ConfigurationFlags.ZSTD_TRAINING_ALLOWED) == 0)
-    ) and state.training_data is not None:
+    if not enable_training and state.training_data is not None:
         if state.training_data.type == _CompressorTrainingInfoType.BEFORE_LOW_WATERMARK:
             state.training_data.collector.tmpfile.close()
         if (
@@ -1255,27 +1381,35 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
             state.training_data.collector.tmpfile.close()
         state.training_data = None
 
-    if (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0:
-        state.standard_compressor = _CompressorReady(
-            type=_CompressorState.READY,
-            dictionary_id=1,
-            level=3,
-            data=None,
-            compressor=zstandard.ZstdCompressor(
+    if enable_zstd:
+
+        async def _make_standard_compressor() -> _CompressorReady:
+            return _CompressorReady(
+                type=_CompressorState.READY,
+                dictionary_id=1,
                 level=3,
-                write_checksum=False,
-                write_content_size=False,
-                write_dict_id=False,
-            ),
-            decompressor=zstandard.ZstdDecompressor(
-                max_window_size=state.broadcaster_config.decompression_max_window_size
-            ),
+                data=None,
+                compressor=zstandard.ZstdCompressor(
+                    level=3,
+                    write_checksum=False,
+                    write_content_size=False,
+                    write_dict_id=False,
+                ),
+                decompressor=zstandard.ZstdDecompressor(
+                    max_window_size=state.broadcaster_config.decompression_max_window_size
+                ),
+            )
+
+        state.standard_compressor = _CompressorPreparing(
+            type=_CompressorState.PREPARING,
+            dictionary_id=1,
+            task=asyncio.create_task(_make_standard_compressor()),
         )
 
     if (
         dictionary_id != 0  # "no compression"
         and dictionary_id != 1  # reserved for not using a dictionary
-        and (flags & _ConfigurationFlags.ZSTD_ENABLED) != 0
+        and enable_zstd
         and state.broadcaster_config.compression_allowed
         and (
             state.active_compressor is None
@@ -1362,6 +1496,29 @@ async def _acknowledge_compressor_ready(
                 compressor.level.to_bytes(
                     _smallest_unsigned_size(compressor.level),
                     "big",
+                ),
+            ),
+            (
+                "x-min-size",
+                (
+                    state.broadcaster_config.compression_min_size.to_bytes(4, "big")
+                    if compressor.dictionary_id > 1
+                    else state.broadcaster_config.compression_trained_max_size.to_bytes(
+                        4, "big"
+                    )
+                ),
+            ),
+            (
+                "x-max-size",
+                (
+                    state.broadcaster_config.compression_trained_max_size.to_bytes(
+                        _smallest_unsigned_size(
+                            state.broadcaster_config.compression_trained_max_size
+                        ),
+                        "big",
+                    )
+                    if compressor.dictionary_id > 1
+                    else (2**64 - 1).to_bytes(8, "big")
                 ),
             ),
         ],
@@ -1517,7 +1674,7 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
 
     if compressor_id != 0 and (
         not state.broadcaster_config.compression_allowed
-        or (state.socket_level_config.flags & _ConfigurationFlags.ZSTD_ENABLED) == 0
+        or not state.socket_level_config.enable_zstd
     ):
         raise ValueError("compression used but compression is forbidden")
 
@@ -1569,6 +1726,7 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
 
     decompressed_data: Optional[SyncIOBaseLikeIO] = None
     if decompressor is None:
+        _store_small_for_compression_training(state, compressed_data)
         decompressed_data = io.BytesIO(compressed_data)
         decompressed_sha512 = hashlib.sha512(compressed_data).digest()
         decompressed_length = len(compressed_data)
@@ -1600,6 +1758,23 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
             raise
         finally:
             unseekable_decompressed_data.close()
+
+        try:
+            if _should_store_large_message_for_training(state, decompressed_length):
+                capturer = _make_store_for_training_capturer(state, decompressed_length)
+                try:
+                    while True:
+                        chunk = decompressed_data.read(io.DEFAULT_BUFFER_SIZE)
+                        if not chunk:
+                            break
+                        capturer.write(chunk)
+                        await asyncio.sleep(0)
+                    decompressed_data.seek(0)
+                finally:
+                    capturer.close()
+        except BaseException:
+            decompressed_data.close()
+            raise
 
     try:
         notify_result = await handle_trusted_notify(
@@ -1762,6 +1937,19 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
 
     if compressor is None:
         notif.body.seek(0)
+        if _should_store_large_message_for_training(state, notif.deflated_length):
+            capturer = _make_store_for_training_capturer(state, notif.deflated_length)
+            try:
+                while True:
+                    chunk = notif.body.read(io.DEFAULT_BUFFER_SIZE)
+                    if not chunk:
+                        break
+                    capturer.write(chunk)
+                    await asyncio.sleep(0)
+                notif.body.seek(0)
+            finally:
+                capturer.close()
+
         result = await handle_trusted_notify(
             notif.topic,
             notif.body,
@@ -1810,20 +1998,25 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
     ) as target:
         decompressed_hasher = hashlib.sha512()
 
-        with compressor.decompressor.stream_reader(
-            cast(IO[bytes], notif.body), read_size=io.DEFAULT_BUFFER_SIZE
-        ) as decompressor:
-            while True:
-                chunk = decompressor.read(io.DEFAULT_BUFFER_SIZE)
-                if not chunk:
-                    break
+        capturer = _make_store_for_training_capturer(state, notif.deflated_length)
+        try:
+            with compressor.decompressor.stream_reader(
+                cast(IO[bytes], notif.body), read_size=io.DEFAULT_BUFFER_SIZE
+            ) as decompressor:
+                while True:
+                    chunk = decompressor.read(io.DEFAULT_BUFFER_SIZE)
+                    if not chunk:
+                        break
 
-                decompressed_hasher.update(chunk)
-                target.write(chunk)
-                if target.tell() > notif.deflated_length:
-                    raise ValueError("decompresses to larger than indicated")
+                    decompressed_hasher.update(chunk)
+                    target.write(chunk)
+                    capturer.write(chunk)
+                    if target.tell() > notif.deflated_length:
+                        raise ValueError("decompresses to larger than indicated")
 
-                await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+        finally:
+            capturer.close()
 
         notif.body.close()
 
@@ -1886,6 +2079,58 @@ _PROCESSOR_BY_TYPE: Dict[
 
 
 def _process_message_asap(state: _StateOpen, message: _ParsedWSMessage) -> None:
+    if message.type == _ParsedWSMessageType.CONTINUE_RECEIVE:
+        identifier = message.headers.get("x-identifier")
+        if identifier is None:
+            raise ValueError("continue receive requires identifier")
+
+        part_id_bytes = message.headers.get("x-part-id")
+        if part_id_bytes is None:
+            raise ValueError("continue receive requires part id")
+
+        if len(part_id_bytes) > 8:
+            raise ValueError("part id too long")
+
+        part_id = int.from_bytes(part_id_bytes, "big")
+
+        try:
+            expecting_ack = state.expecting_acks.get_nowait()
+        except asyncio.QueueEmpty:
+            raise ValueError("not expecting ack right now")
+
+        if expecting_ack.type != _ParsedWSMessageType.CONTINUE_RECEIVE:
+            raise ValueError(f"expecting {expecting_ack.type!r}, got {message.type!r}")
+
+        if expecting_ack.identifier != identifier:
+            raise ValueError(
+                f"expecting {expecting_ack.identifier!r}, got {identifier!r}"
+            )
+
+        if expecting_ack.part_id != part_id:
+            raise ValueError(f"expecting {expecting_ack.part_id}, got {part_id}")
+
+        return
+
+    if message.type == _ParsedWSMessageType.CONFIRM_RECEIVE:
+        identifier = message.headers.get("x-identifier")
+        if identifier is None:
+            raise ValueError("confirm receive requires identifier")
+
+        try:
+            expecting_ack = state.expecting_acks.get_nowait()
+        except asyncio.QueueEmpty:
+            raise ValueError("not expecting ack right now")
+
+        if expecting_ack.type != _ParsedWSMessageType.CONFIRM_RECEIVE:
+            raise ValueError(f"expecting {expecting_ack.type}, got {message.type}")
+
+        if expecting_ack.identifier != identifier:
+            raise ValueError(
+                f"expecting {expecting_ack.identifier!r}, got {identifier!r}"
+            )
+
+        return
+
     if state.process_task is not None:
         state.unprocessed_receives.append(message)
         return
@@ -1938,6 +2183,14 @@ async def _handle_open(state: _State) -> _State:
         ):
             state.active_compressor = state.active_compressor.task.result()
             return await _acknowledge_compressor_ready(state, state.active_compressor)
+
+        if (
+            state.standard_compressor is not None
+            and state.standard_compressor.type == _CompressorState.PREPARING
+            and state.standard_compressor.task.done()
+        ):
+            state.standard_compressor = state.standard_compressor.task.result()
+            return await _acknowledge_compressor_ready(state, state.standard_compressor)
 
         if state.message_task.done():
             msg = state.message_task.result()
@@ -2010,6 +2263,13 @@ async def _handle_open(state: _State) -> _State:
                 state.read_task,
                 state.message_task,
                 *([state.send_task] if state.send_task is not None else []),
+                *([state.process_task] if state.process_task is not None else []),
+                *(
+                    [state.standard_compressor.task]
+                    if state.standard_compressor is not None
+                    and state.standard_compressor.type == _CompressorState.PREPARING
+                    else []
+                ),
                 *(
                     [state.active_compressor.task]
                     if state.active_compressor is not None
@@ -2040,6 +2300,11 @@ async def _cleanup_open(
         state.send_task.cancel()
     if state.process_task is not None:
         state.process_task.cancel()
+    if (
+        state.standard_compressor is not None
+        and state.standard_compressor.type == _CompressorState.PREPARING
+    ):
+        state.standard_compressor.task.cancel()
     if (
         state.active_compressor is not None
         and state.active_compressor.type == _CompressorState.PREPARING
@@ -2167,17 +2432,18 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         the authorization header
 
         headers:
-            - none
+        - x-subscriber-nonce: 32 random bytes representing the subscriber's contribution
+            to the nonce. The broadcaster will provide its contribution in the response.
+        - x-enable-zstd: 1 byte, big-endian, unsigned. 0 to disable zstandard compression,
+            1 to indicate the client is willing to receive zstandard compressed messages.
+        - x-enable-training: 1 byte, big-endian, unsigned. 0 to indicate the client will not
+        accept custom compression dictionaries, 1 to indicate the client may accept them.
+        - x-initial-dict: 2 bytes, big-endian, unsigned. 0 to indicate the client does not
+        have a specific preset dictionary in mind to use, otherwise, the id of the preset
+        dictionary the client thinks is a good fit for this connection
 
         body:
-            - 32 bytes (N): subscriber chosen random bytes to contribute to generating the nonce. The connection
-                nonce is SHA256(subscriber_nonce CONCAT broadcaster_nonce).
-            - 4 bytes (C): configuration flags, big-endian encoded, unsigned. From least to most significant bit:
-                - 1: whether zstandard compression is enabled for notify and receive (set: enable, unset: disable).
-                - 2: whether training a compression dictionary on the sent and received message bodies may be useful
-                    (set: should train, unset: must not train). generally should be set if >50mb of data is expected to be
-                    sent and received in <16kb chunks.
-            - 2 bytes (D): either 0x00 or the id of the preset compression dictionary to start with
+            none
     1: Subscribe:
         subscribe to an exact topic or glob pattern
 
@@ -2225,6 +2491,21 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         body:
             - blob of data to append to the compressed notification body
+    5: Continue Receive:
+        confirms that the subscriber received part of a streamed notification and needs more
+
+        headers:
+        - x-identifier: the identifier of the notification the subscriber needs more parts for
+        - x-part-id: the part id that they received up to, big-endian, unsigned, max 8 bytes
+
+        body: none
+    6. Confirm Receive:
+        confirms that the subscriber received a streamed notification
+
+        headers:
+        - x-identifier: the identifier of the notification that was sent
+
+        body: none
 
     ## Messages Sent to the Subscriber
 
@@ -2326,10 +2607,17 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
         configuration with the assumption the subscriber has them
 
         headers:
-            x-identifier: which compressor is enabled, unsigned, big-endian, max 2 bytes, min 1
+            x-identifier: which compressor is enabled, unsigned, big-endian, max 2 bytes, min 1.
+                A value of 1 means compression without a custom dictionary.
             x-compression-level: what compression level we think is best when using
                 this dictionary. signed, big-endian, max 2 bytes, max 22. the subscriber
                 is free to choose a different compression level
+            x-min-size: 4 bytes, big-endian, unsigned. a hint to the client for the smallest
+                payload for which we think this dictionary is useful. the client can use this
+                dictionary on smaller messages if it wants
+            x-max-size: 8 bytes, big-endian, unsigned. a hint to the client for the largest
+                payload for which we think this dictionary is useful. uses 2**64-1 to indicate
+                no upper bound. the client can use this dictionary on larger messages if it wants
 
         body: none
     101: Enable zstandard compression with a custom dictionary
@@ -2341,6 +2629,12 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             x-compression-level: what compression level we think is best when using
                 this dictionary. signed, big-endian, max 2 bytes, max 22. the subscriber
                 is free to choose a different compression level
+            x-min-size: inclusive, max 4 bytes, big-endian, unsigned. a hint to the client for the smallest
+                payload for which we think this dictionary is useful. the client can use this
+                dictionary on smaller messages if it wants
+            x-max-size: exclusive, max 8 bytes, big-endian, unsigned. a hint to the client for the largest
+                payload for which we think this dictionary is useful. uses 2**64-1 to indicate
+                no upper bound. the client can use this dictionary on larger messages if it wants
 
         body: the dictionary, max 15MB, typically ~16kb. may be length 0 to
             indicate we no longer want to use this dictionary

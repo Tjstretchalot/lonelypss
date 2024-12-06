@@ -128,6 +128,26 @@ class SyncIOBaseLikeIOB(
 SyncIOBaseLikeIO = Union[SyncIOBaseLikeIOA, SyncIOBaseLikeIOB]
 """For when you want to use RawIOBase but it's not a protocol"""
 
+
+class VoidSyncIO:
+    """A SyncIOBaseLikeIO that does nothing"""
+
+    def read(self, n: int) -> bytes:
+        return b""
+
+    def write(self, b: Union[bytes, bytearray], /) -> int:
+        return len(b)
+
+    def tell(self) -> int:
+        return 0
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return 0
+
+    def close(self) -> None:
+        pass
+
+
 if TYPE_CHECKING:
     import tempfile
 
@@ -145,3 +165,6 @@ if TYPE_CHECKING:
 
     # verify that the result of TemporaryFile matches IO base like
     _i: Type[SyncIOBaseLikeIO] = tempfile._TemporaryFileWrapper
+
+    # misc
+    _j: Type[SyncIOBaseLikeIO] = VoidSyncIO

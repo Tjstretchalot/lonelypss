@@ -245,6 +245,7 @@ def _make_config() -> Config:{load_auth_secrets}
             websocket_max_pending_sends=255,
             websocket_max_unprocessed_receives=255,
             websocket_large_direct_send_timeout=0.3,
+            websocket_send_max_unacknowledged=3,
         ),
         compression=CompressionConfigFromParts(
             compression_allowed=True,
