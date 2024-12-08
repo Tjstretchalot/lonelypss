@@ -9,11 +9,13 @@ repository to be notified when it reaches the next stage!
 ## Overview
 
 This library is for when you need best-effort pub/sub behavior across the
-network, but don't want to maintain open connections with your clients. For
-example, when subscribing to restart/upgrade requests within CI/CD, or for cache
-busting local instance disk caches, or when revoked JSON web tokens early due to
-explicit logout (while still avoiding a network roundtrip on every authorization
-check by maintaining the revocation list locally).
+network, but don't want to maintain open connections with all your clients,
+don't want polling, don't want message buffering, and might want very large
+(>4gb) messages. For example, when subscribing to restart/upgrade requests
+within CI/CD, or for eagerly filling or busting local instance disk caches, or
+when revoking JSON web tokens early due to explicit logout (while still avoiding
+a network roundtrip on every authorization check by maintaining the revocation
+list locally).
 
 This is a Python server that registers subscriptions into a relational database,
 and sends messages via webhooks (HTTP POST) requests to subscribers. It's
