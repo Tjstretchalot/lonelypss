@@ -33,7 +33,6 @@ from lonelypss.routes.notify import (
     TrustedNotifyResultType,
     handle_trusted_notify,
 )
-from lonelypss.routes.subscribe import SubscribeType, parse_subscribe_payload
 from lonelypss.util.close_guarded_io import CloseGuardedIO
 from lonelypss.util.websocket_message import (
     WSMessage,
