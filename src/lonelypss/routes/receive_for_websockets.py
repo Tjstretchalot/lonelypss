@@ -6,8 +6,8 @@ import time
 from fastapi import APIRouter, Request, Response, Header
 from typing import Annotated, Optional
 
-from httppubsubserver.middleware.config import get_config_from_request
-from httppubsubserver.middleware.ws_receiver import get_ws_receiver_from_request
+from lonelypss.middleware.config import get_config_from_request
+from lonelypss.middleware.ws_receiver import get_ws_receiver_from_request
 
 router = APIRouter()
 

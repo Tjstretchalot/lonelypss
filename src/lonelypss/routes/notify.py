@@ -11,10 +11,10 @@ import hashlib
 import aiohttp
 import logging
 
-from httppubsubserver.middleware.config import get_config_from_request
-from httppubsubserver.util.close_guarded_io import CloseGuardedIO
-from httppubsubserver.util.sync_io import read_exact, SyncIOBaseLikeIO
-from httppubsubserver.config.config import Config
+from lonelypss.middleware.config import get_config_from_request
+from lonelypss.util.close_guarded_io import CloseGuardedIO
+from lonelypss.util.sync_io import read_exact, SyncIOBaseLikeIO
+from lonelypss.config.config import Config
 
 
 class NotifyResponse(BaseModel):

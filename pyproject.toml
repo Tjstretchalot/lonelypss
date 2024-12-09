@@ -1,5 +1,5 @@
 [project]
-name = "httppubsubserver"
+name = "lonelypss"
 version = "0.0.1"
 description = "PubSub over HTTP"
 authors = [
@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-httppubsubserver = "httppubsubserver.main:main"
+lonelypss = "lonelypss.main:main"
 
 [project.optional-dependencies]
 standard = [

@@ -1,7 +1,7 @@
 import io
 from typing import Any, Union, TYPE_CHECKING
 import sys
-from httppubsubserver.util.sync_io import SyncIOBaseLikeIO
+from lonelypss.util.sync_io import SyncIOBaseLikeIO
 
 
 if sys.version_info <= (3, 10):

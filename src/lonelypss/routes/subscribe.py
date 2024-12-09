@@ -1,31 +1,82 @@
+from enum import Enum, auto
 import time
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional, Union
 from fastapi import APIRouter, Header, Request, Response
 import io
-
-from httppubsubserver.middleware.config import get_config_from_request
-from httppubsubserver.routes.subscribe import SubscribeType, parse_subscribe_payload
+from dataclasses import dataclass
+from lonelypss.middleware.config import get_config_from_request
+from lonelypss.util.sync_io import SyncReadableBytesIO, read_exact
 
 
 router = APIRouter()
 
 
+class SubscribeType(Enum):
+    EXACT = auto()
+    GLOB = auto()
+
+
+@dataclass
+class SubscribePayloadExact:
+    type: Literal[SubscribeType.EXACT]
+    url: str
+    topic: bytes
+
+
+@dataclass
+class SubscribePayloadGlob:
+    type: Literal[SubscribeType.GLOB]
+    url: str
+    glob: str
+
+
+SubscribePayload = Union[SubscribePayloadExact, SubscribePayloadGlob]
+
+
+def parse_subscribe_payload(body: SyncReadableBytesIO) -> SubscribePayload:
+    """Parses the body intended for the /v1/subscribe endpoint. Raises
+    ValueError if the body is malformed.
+
+    The body is expected to be buffered as this may make many small reads
+    """
+    url_len = int.from_bytes(read_exact(body, 2), "big", signed=False)
+    url_bytes = read_exact(body, url_len)
+    url = url_bytes.decode("utf-8", errors="strict")
+
+    match_type = int.from_bytes(read_exact(body, 1), "big", signed=False)
+    if match_type not in (0, 1):
+        raise ValueError(f"unknown match type (0 or 1 expected, got {match_type})")
+
+    is_exact = match_type == 0
+
+    pattern_len = int.from_bytes(read_exact(body, 2), "big", signed=False)
+    pattern_bytes = read_exact(body, pattern_len)
+
+    if is_exact:
+        return SubscribePayloadExact(
+            type=SubscribeType.EXACT, url=url, topic=pattern_bytes
+        )
+
+    glob = pattern_bytes.decode("utf-8")
+    return SubscribePayloadGlob(type=SubscribeType.GLOB, url=url, glob=glob)
+
+
 @router.post(
-    "/v1/unsubscribe",
+    "/v1/subscribe",
     status_code=202,
     responses={
         "400": {"description": "The body was not formatted correctly"},
         "401": {"description": "Authorization header is required but not provided"},
         "403": {"description": "Authorization header is provided but invalid"},
-        "409": {"description": "The subscription does not exist"},
+        "409": {"description": "The subscription already exists"},
         "500": {"description": "Unexpected error occurred"},
         "503": {"description": "Service is unavailable, try again soon"},
     },
 )
-async def unsubscribe(
+async def subscribe(
     request: Request, authorization: Annotated[Optional[str], Header()] = None
 ) -> Response:
-    """Unsubscribes the given URL from the given pattern. The body should be
+    """Subscribes the given URL to the given pattern. The body should be
     formatted as the following sequence:
 
     - 2 bytes: the length of the url, big-endian, unsigned
@@ -36,10 +87,14 @@ async def unsubscribe(
     - M bytes: the pattern or exact match. if glob-style, must be utf-8,
       otherwise unrestricted
 
+    NOTE: if you want to use the same path and topic for multiple subscriptions
+    to get multiple notifications, you can include a hash that disambiguates them,
+    for example http://192.0.2.0:8080/#uid=abc123
+
     The response has an arbitrary body (generally empty) and one of the
     following status codes:
 
-    - 200 Okay: the subscription was removed
+    - 202 Accepted: the subscription was added
     - 400 Bad Request: the body was not formatted correctly
     - 401 Unauthorized: authorization is required but not provided
     - 403 Forbidden: authorization is provided but invalid
@@ -78,15 +133,15 @@ async def unsubscribe(
         return Response(status_code=500)
 
     if parsed.type == SubscribeType.EXACT:
-        db_result = await config.unsubscribe_exact(url=parsed.url, exact=parsed.topic)
+        db_result = await config.subscribe_exact(url=parsed.url, exact=parsed.topic)
     else:
-        db_result = await config.unsubscribe_glob(url=parsed.url, glob=parsed.glob)
+        db_result = await config.subscribe_glob(url=parsed.url, glob=parsed.glob)
 
-    if db_result == "not_found":
+    if db_result == "conflict":
         return Response(status_code=409)
     elif db_result == "unavailable":
         return Response(status_code=503)
     elif db_result != "success":
         return Response(status_code=500)
 
-    return Response(status_code=200)
+    return Response(status_code=202)

@@ -1,5 +1,5 @@
 from typing import Protocol
-from httppubsubserver.util.sync_io import SyncReadableBytesIO
+from lonelypss.util.sync_io import SyncReadableBytesIO
 
 
 class BaseWSReceiver(Protocol):

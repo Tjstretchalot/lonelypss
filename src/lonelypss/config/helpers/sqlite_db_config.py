@@ -1,13 +1,13 @@
 import sqlite3
 from typing import TYPE_CHECKING, AsyncIterable, Literal, Optional, Type
-from httppubsubserver.config.config import (
+from lonelypss.config.config import (
     SubscriberInfo,
     SubscriberInfoExact,
     SubscriberInfoGlob,
 )
 
 if TYPE_CHECKING:
-    from httppubsubserver.config.config import DBConfig
+    from lonelypss.config.config import DBConfig
 
 
 class SqliteDBConfig:

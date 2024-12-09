@@ -13,7 +13,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from httppubsubserver.config.auth_config import AuthConfig
+from lonelypss.config.auth_config import AuthConfig
 import importlib
 
 try:
@@ -466,7 +466,7 @@ class CompressionConfigFromParts:
 
 
 class Config(AuthConfig, DBConfig, GenericConfig, CompressionConfig, Protocol):
-    """The injected behavior required for the httppubsubserver to operate. This is
+    """The injected behavior required for the lonelypss to operate. This is
     generally generated for you using one of the templates, see the readme for details
     """
 

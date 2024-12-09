@@ -212,19 +212,19 @@ def setup_locally(
             f"""from contextlib import asynccontextmanager
 from typing import AsyncIterator
 from fastapi import FastAPI
-import httppubsubserver.config.helpers.{db}_db_config as db_config
-import httppubsubserver.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
-import httppubsubserver.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
-from httppubsubserver.middleware.config import ConfigMiddleware
-from httppubsubserver.config.lifespan import setup_config, teardown_config
-from httppubsubserver.config.auth_config import AuthConfigFromParts
-from httppubsubserver.config.config import (
+import lonelypss.config.helpers.{db}_db_config as db_config
+import lonelypss.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
+import lonelypss.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
+from lonelypss.middleware.config import ConfigMiddleware
+from lonelypss.config.lifespan import setup_config, teardown_config
+from lonelypss.config.auth_config import AuthConfigFromParts
+from lonelypss.config.config import (
     Config,
     ConfigFromParts,
     GenericConfigFromValues,
     CompressionConfigFromParts,
 )
-from httppubsubserver.router import router as HttpPubSubRouter{import_json}
+from lonelypss.router import router as HttpPubSubRouter{import_json}
 
 
 def _make_config() -> Config:{load_auth_secrets}

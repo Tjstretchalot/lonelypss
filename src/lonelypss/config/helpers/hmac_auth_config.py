@@ -8,7 +8,7 @@ import time
 from typing import Literal, Optional, TYPE_CHECKING, Protocol, Tuple, Type, Union, cast
 
 if TYPE_CHECKING:
-    from httppubsubserver.config.auth_config import (
+    from lonelypss.config.auth_config import (
         IncomingAuthConfig,
         OutgoingAuthConfig,
     )

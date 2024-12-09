@@ -1,4 +1,4 @@
-from httppubsubserver.config.config import Config
+from lonelypss.config.config import Config
 
 
 async def setup_config(config: Config) -> None:

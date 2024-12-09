@@ -26,23 +26,23 @@ from fastapi import APIRouter, WebSocket
 from dataclasses import dataclass
 from collections import deque
 from enum import IntFlag, IntEnum, Enum, auto
-from httppubsubserver.config.config import Config
-from httppubsubserver.middleware.config import get_config_from_request
-from httppubsubserver.middleware.ws_receiver import get_ws_receiver_from_request
-from httppubsubserver.routes.notify import (
+from lonelypss.config.config import Config
+from lonelypss.middleware.config import get_config_from_request
+from lonelypss.middleware.ws_receiver import get_ws_receiver_from_request
+from lonelypss.routes.notify import (
     TrustedNotifyResultType,
     handle_trusted_notify,
 )
-from httppubsubserver.routes.subscribe import SubscribeType, parse_subscribe_payload
-from httppubsubserver.util.close_guarded_io import CloseGuardedIO
-from httppubsubserver.util.websocket_message import (
+from lonelypss.routes.subscribe import SubscribeType, parse_subscribe_payload
+from lonelypss.util.close_guarded_io import CloseGuardedIO
+from lonelypss.util.websocket_message import (
     WSMessage,
     WSMessageBytes,
 )
 import asyncio
 
-from httppubsubserver.util.ws_receiver import BaseWSReceiver, FanoutWSReceiver
-from httppubsubserver.util.sync_io import (
+from lonelypss.util.ws_receiver import BaseWSReceiver, FanoutWSReceiver
+from lonelypss.util.sync_io import (
     SyncReadableBytesIO,
     SyncIOBaseLikeIO,
     VoidSyncIO,

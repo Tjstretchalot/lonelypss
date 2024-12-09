@@ -2,7 +2,7 @@ import hmac
 from typing import Literal, Optional, TYPE_CHECKING, Type
 
 if TYPE_CHECKING:
-    from httppubsubserver.config.auth_config import (
+    from lonelypss.config.auth_config import (
         IncomingAuthConfig,
         OutgoingAuthConfig,
     )

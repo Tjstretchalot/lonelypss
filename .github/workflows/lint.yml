@@ -13,7 +13,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python_version }}
-      - name: Fetch httppubsubserver
+      - name: Fetch lonelypss
         uses: actions/checkout@v4
       - name: Generic python setup
         run: |
@@ -21,10 +21,10 @@ jobs:
       - name: Installing dependencies
         run: |
           python -m pip install -r requirements.txt
-      - name: Lint httppubsubserver with black
+      - name: Lint lonelypss with black
         run: |
-          python -m black --check src/httppubsubserver
-      - name: Type check httppubsubserver with mypy
+          python -m black --check src/lonelypss
+      - name: Type check lonelypss with mypy
         working-directory: src
         run: |
-          mypy httppubsubserver --explicit-package-bases --disallow-untyped-defs
+          mypy lonelypss --explicit-package-bases --disallow-untyped-defs
