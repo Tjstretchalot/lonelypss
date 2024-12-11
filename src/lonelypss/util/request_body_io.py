@@ -13,7 +13,6 @@ class AsyncIterableAIO:
 
     async def read(self, n: int) -> bytes:
         if n < 0:
-
             while not self._finished:
                 try:
                     self._buffer += await self._iter.__anext__()

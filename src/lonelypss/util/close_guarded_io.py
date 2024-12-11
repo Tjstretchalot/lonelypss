@@ -1,5 +1,5 @@
 import io
-from typing import Any, Union, TYPE_CHECKING
+from typing import Any, Union
 import sys
 from lonelypss.util.sync_io import SyncIOBaseLikeIO
 

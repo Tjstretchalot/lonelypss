@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Protocol, Type, Union
+from typing import Protocol, Union
 
 
 class AsyncReadableBytesIOA(Protocol):

@@ -25,7 +25,7 @@ import aiohttp
 from fastapi import APIRouter, WebSocket
 from dataclasses import dataclass, replace as replace_in_dataclass
 from collections import deque
-from enum import IntFlag, IntEnum, Enum, auto
+from enum import Enum, auto
 from lonelypss.config.config import Config
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.middleware.ws_receiver import get_ws_receiver_from_request
@@ -622,10 +622,11 @@ async def _check_training_data(state: _StateOpen) -> _State:
         state.custom_compression_dict_counter += 1
 
         async def _make_compressor() -> _CompressorReady:
-            zdict, level = (
-                await state.broadcaster_config.train_compression_dict_low_watermark(
-                    samples
-                )
+            (
+                zdict,
+                level,
+            ) = await state.broadcaster_config.train_compression_dict_low_watermark(
+                samples
             )
             return _CompressorReady(
                 type=_CompressorState.READY,
@@ -682,10 +683,11 @@ async def _check_training_data(state: _StateOpen) -> _State:
         state.custom_compression_dict_counter += 1
 
         async def _make_compressor() -> _CompressorReady:
-            zdict, level = (
-                await state.broadcaster_config.train_compression_dict_high_watermark(
-                    samples
-                )
+            (
+                zdict,
+                level,
+            ) = await state.broadcaster_config.train_compression_dict_high_watermark(
+                samples
             )
             return _CompressorReady(
                 type=_CompressorState.READY,

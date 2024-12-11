@@ -184,12 +184,12 @@ def setup_locally(
 
     if outgoing_auth == "token":
         outgoing_auth_code = (
-            f'OutgoingTokenAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
+            'OutgoingTokenAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
         )
         need_secrets = True
     elif outgoing_auth == "hmac":
         outgoing_auth_code = (
-            f'OutgoingHmacAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
+            'OutgoingHmacAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
         )
     elif outgoing_auth == "none":
         outgoing_auth_code = "OutgoingNoneAuth()"
@@ -207,7 +207,6 @@ def setup_locally(
     import_json = "\nimport json" if need_secrets else ""
 
     with open("main.py", "w") as f:
-
         f.write(
             f"""from contextlib import asynccontextmanager
 from typing import AsyncIterator
