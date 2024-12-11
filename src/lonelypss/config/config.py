@@ -202,6 +202,31 @@ class GenericConfig(Protocol):
         A reasonable value is 3
         """
 
+    @property
+    def websocket_minimal_headers(self) -> bool:
+        """True if all messages from the broadcaster to the subscriber should use
+        minimal headers, which are faster to parse and more compact but require
+        that the subscriber and broadcaster precisely agree on the headers for
+        each message. False if all messages from the broadcaster to the
+        subscriber use expanded headers, which are more flexible and easier to
+        debug but slower to parse and more verbose.
+
+        If you are trying to understand the lonelypss protocol via something
+        like wireshark, setting this to False will make messages somewhat easier
+        to understand.
+
+        Note that broadcasters and subscribers do not need to agree on this
+        setting. It is ok if the broadcaster is sending expanded headers and the
+        subscriber is sending minimal headers, or vice versa, as this only
+        configures the outgoing messages but they both always accept either
+        version for incoming messages.
+
+        Generally, this should be True except when in the process of updating
+        the lonelypss/lonelypsc libraries, in which case it should be changed to
+        false on the broadcaster and subscribers, then they should be updated
+        one at a time, then set to true.
+        """
+
 
 class GenericConfigFromValues:
     """Convenience class that allows you to create a GenericConfig protocol
@@ -219,6 +244,7 @@ class GenericConfigFromValues:
         websocket_max_unprocessed_receives: Optional[int],
         websocket_large_direct_send_timeout: Optional[float],
         websocket_send_max_unacknowledged: Optional[int],
+        websocket_minimal_headers: bool,
     ):
         self.message_body_spool_size = message_body_spool_size
         self.outgoing_http_timeout_total = outgoing_http_timeout_total
@@ -230,6 +256,7 @@ class GenericConfigFromValues:
         self.websocket_max_unprocessed_receives = websocket_max_unprocessed_receives
         self.websocket_large_direct_send_timeout = websocket_large_direct_send_timeout
         self.websocket_send_max_unacknowledged = websocket_send_max_unacknowledged
+        self.websocket_minimal_headers = websocket_minimal_headers
 
 
 class CompressionConfig(Protocol):
@@ -672,6 +699,10 @@ class ConfigFromParts:
     @property
     def decompression_max_window_size(self) -> int:
         return self.compression.decompression_max_window_size
+
+    @property
+    def websocket_minimal_headers(self) -> bool:
+        return self.generic.websocket_minimal_headers
 
 
 if TYPE_CHECKING:
