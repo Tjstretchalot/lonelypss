@@ -28,3 +28,5 @@ jobs:
         working-directory: src
         run: |
           mypy lonelypss --explicit-package-bases --disallow-untyped-defs
+      - name: Lint lonelypss with ruff
+        run: ruff check --output-format=github src
