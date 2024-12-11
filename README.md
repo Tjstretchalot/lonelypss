@@ -78,7 +78,7 @@ arbitrary bytes.
 If the same url has multiple subscriptions that match the same message (via glob
 patterns), it will receive multiple copies of the message. If the same url tries
 to register the exact same subscription multiple times, it will only be
-registered once (a 409 Conflict will be returned from /v1/subscribe)
+registered once (a 409 Conflict will be returned from /v1/subscribe/\*)
 
 ## Installation
 

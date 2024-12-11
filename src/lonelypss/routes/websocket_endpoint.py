@@ -23,7 +23,7 @@ from typing import (
 )
 import aiohttp
 from fastapi import APIRouter, WebSocket
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as replace_in_dataclass
 from collections import deque
 from enum import IntFlag, IntEnum, Enum, auto
 from lonelypss.config.config import Config
@@ -48,6 +48,58 @@ from lonelypss.util.sync_io import (
     read_exact,
 )
 
+from lonelypsp.stateful.messages.confirm_configure import (
+    B2S_ConfirmConfigure,
+    serialize_b2s_confirm_configure,
+)
+from lonelypsp.stateful.messages.continue_receive import S2B_ContinueReceive
+from lonelypsp.stateful.messages.confirm_receive import S2B_ConfirmReceive
+from lonelypsp.stateful.messages.receive_stream import (
+    B2S_ReceiveStreamContinuation,
+    B2S_ReceiveStreamStartCompressed,
+    B2S_ReceiveStreamStartUncompressed,
+    serialize_b2s_receive_stream,
+)
+from lonelypsp.stateful.messages.enable_zstd_custom import (
+    B2S_EnableZstdCustom,
+    serialize_b2s_enable_zstd_custom,
+)
+from lonelypsp.stateful.messages.enable_zstd_preset import (
+    B2S_EnableZstdPreset,
+    serialize_b2s_enable_zstd_preset,
+)
+from lonelypsp.stateful.messages.confirm_subscribe import (
+    B2S_ConfirmSubscribeExact,
+    B2S_ConfirmSubscribeGlob,
+    serialize_b2s_confirm_subscribe_exact,
+    serialize_b2s_confirm_subscribe_glob,
+)
+from lonelypsp.stateful.messages.confirm_unsubscribe import (
+    B2S_ConfirmUnsubscribeExact,
+    B2S_ConfirmUnsubscribeGlob,
+    serialize_b2s_confirm_unsubscribe_exact,
+    serialize_b2s_confirm_unsubscribe_glob,
+)
+from lonelypsp.stateful.messages.confirm_notify import (
+    B2S_ConfirmNotify,
+    serialize_b2s_confirm_notify,
+)
+from lonelypsp.stateful.messages.continue_notify import (
+    B2S_ContinueNotify,
+    serialize_b2s_continue_notify,
+)
+from lonelypsp.stateful.messages.notify_stream import (
+    S2B_NotifyStreamStartCompressed,
+    S2B_NotifyStreamStartUncompressed,
+)
+from lonelypsp.stateful.parser import S2B_AnyMessageParser
+from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
+from lonelypsp.stateful.constants import (
+    BroadcasterToSubscriberStatefulMessageType,
+    SubscriberToBroadcasterStatefulMessageType,
+)
+from lonelypsp.stateful.message import S2B_Message
+
 try:
     import zstandard
 except ImportError:
@@ -65,161 +117,6 @@ except ImportError:
 
 
 router = APIRouter()
-
-
-class _ParsedWSMessageFlags(IntFlag):
-    MINIMAL_HEADERS = 1 << 0
-
-
-class _ParsedWSMessageType(IntEnum):
-    CONFIGURE = auto()
-    SUBSCRIBE_EXACT = auto()
-    SUBSCRIBE_GLOB = auto()
-    UNSUBSCRIBE_EXACT = auto()
-    UNSUBSCRIBE_GLOB = auto()
-    NOTIFY = auto()
-    NOTIFY_STREAM = auto()
-    CONTINUE_RECEIVE = auto()
-    CONFIRM_RECEIVE = auto()
-
-
-class _OutgoingParsedWSMessageType(IntEnum):
-    CONFIRM_CONFIGURE = auto()
-    CONFIRM_SUBSCRIBE_EXACT = auto()
-    CONFIRM_SUBSCRIBE_GLOB = auto()
-    CONFIRM_UNSUBSCRIBE_EXACT = auto()
-    CONFIRM_UNSUBSCRIBE_GLOB = auto()
-    CONFIRM_NOTIFY = auto()
-    CONTINUE_NOTIFY = auto()
-    RECEIVE_STREAM = auto()
-    ENABLE_ZSTD_PRESET = auto()
-    ENABLE_ZSTD_CUSTOM = auto()
-
-
-@dataclass
-class _ParsedWSMessage:
-    flags: _ParsedWSMessageFlags
-    type: _ParsedWSMessageType
-    headers: Dict[str, bytes]
-    body: bytes
-
-
-@dataclass
-class _ContinueReceive:
-    type: Literal[_ParsedWSMessageType.CONTINUE_RECEIVE]
-    identifier: bytes
-    part_id: int
-
-
-@dataclass
-class _ConfirmReceive:
-    type: Literal[_ParsedWSMessageType.CONFIRM_RECEIVE]
-    identifier: bytes
-
-
-_Acknowledgement = Union[_ContinueReceive, _ConfirmReceive]
-
-
-_STANDARD_MINIMAL_HEADERS_BY_TYPE: Dict[_ParsedWSMessageType, List[str]] = {
-    _ParsedWSMessageType.CONFIGURE: [
-        "x-subscriber-nonce",
-        "x-enable-zstd",
-        "x-enable-training",
-        "x-initial-dict",
-    ],
-    _ParsedWSMessageType.SUBSCRIBE_EXACT: ["authorization", "x-topic"],
-    _ParsedWSMessageType.SUBSCRIBE_GLOB: ["authorization", "x-glob"],
-    _ParsedWSMessageType.UNSUBSCRIBE_EXACT: ["authorization", "x-topic"],
-    _ParsedWSMessageType.UNSUBSCRIBE_GLOB: ["authorization", "x-glob"],
-    _ParsedWSMessageType.NOTIFY: [
-        "authorization",
-        "x-identifier",
-        "x-topic",
-        "x-compressor",
-        "x-compressed-length",
-        "x-decompressed-length",
-        "x-compressed-sha512",
-    ],
-    _ParsedWSMessageType.CONTINUE_RECEIVE: ["x-part-id", "x-identifier"],
-    _ParsedWSMessageType.CONFIRM_RECEIVE: ["x-identifier"],
-}
-
-
-def _parse_websocket_message(body: bytes) -> _ParsedWSMessage:
-    stream = io.BytesIO(body)
-    flags = _ParsedWSMessageFlags(int.from_bytes(read_exact(stream, 2), "big"))
-    message_type = _ParsedWSMessageType(int.from_bytes(read_exact(stream, 2), "big"))
-
-    headers: Dict[str, bytes] = {}
-    if flags & _ParsedWSMessageFlags.MINIMAL_HEADERS:
-        if message_type in _STANDARD_MINIMAL_HEADERS_BY_TYPE:
-            minimal_headers = _STANDARD_MINIMAL_HEADERS_BY_TYPE[message_type]
-        if message_type == _ParsedWSMessageType.NOTIFY_STREAM:
-            length = int.from_bytes(read_exact(stream, 2), "big")
-            headers["authorization"] = read_exact(stream, length)
-
-            length = int.from_bytes(read_exact(stream, 2), "big")
-            if length > 64:
-                raise ValueError("message id max 64 bytes")
-            headers["x-identifier"] = read_exact(stream, length)
-
-            length = int.from_bytes(read_exact(stream, 2), "big")
-            if length > 8:
-                raise ValueError("part id max 8 bytes")
-            part_id_bytes = read_exact(stream, length)
-            headers["x-part-id"] = part_id_bytes
-
-            part_id = int.from_bytes(part_id_bytes, "big")
-            if part_id == 0:
-                minimal_headers = [
-                    "x-topic",
-                    "x-compressor",
-                    "x-compressed-length",
-                    "x-decompressed-length",
-                    "x-compressed-sha512",
-                ]
-            else:
-                minimal_headers = ["x-identifier"]
-
-        for header in minimal_headers:
-            length = int.from_bytes(read_exact(stream, 2), "big")
-            headers[header] = read_exact(stream, length)
-    else:
-        num_headers = int.from_bytes(read_exact(stream, 2), "big")
-        for _ in range(num_headers):
-            name_length = int.from_bytes(read_exact(stream, 2), "big")
-            name_enc = read_exact(stream, name_length)
-            name = name_enc.decode("ascii").lower()
-            value_length = int.from_bytes(read_exact(stream, 2), "big")
-            value = read_exact(stream, value_length)
-            headers[name] = value
-
-    return _ParsedWSMessage(flags, message_type, headers, stream.read())
-
-
-def _make_websocket_message(
-    flags: _ParsedWSMessageFlags,
-    message_type: _OutgoingParsedWSMessageType,
-    headers: List[Tuple[str, bytes]],
-    body: bytes,
-) -> bytes:
-    stream = io.BytesIO()
-    stream.write(flags.to_bytes(2, "big"))
-    stream.write(message_type.to_bytes(2, "big"))
-    if flags & _ParsedWSMessageFlags.MINIMAL_HEADERS:
-        for _, value in headers:
-            stream.write(len(value).to_bytes(2, "big"))
-            stream.write(value)
-    else:
-        stream.write(len(headers).to_bytes(2, "big"))
-        for name, value in headers:
-            enc_name = name.encode("ascii")
-            stream.write(len(enc_name).to_bytes(2, "big"))
-            stream.write(enc_name)
-            stream.write(len(value).to_bytes(2, "big"))
-            stream.write(value)
-    stream.write(body)
-    return stream.getvalue()
 
 
 def _make_websocket_read_task(websocket: WebSocket) -> asyncio.Task[WSMessage]:
@@ -413,13 +310,11 @@ class _ReceivingNotify:
     identifier: bytes
     """The message id for this notification"""
 
-    last_part_id: int
-    topic: bytes
-    compressor_id: int
-    compressed_length: int
-    decompressed_length: int
-    compressed_sha512: bytes
+    first_part_no_payload: Union[
+        S2B_NotifyStreamStartUncompressed, S2B_NotifyStreamStartCompressed
+    ]
 
+    last_part_id: int
     body_hasher: "hashlib._Hash"
     body: SyncIOBaseLikeIO
 
@@ -448,11 +343,11 @@ class _StateOpen:
     """If we can't push a message to the send_task immediately, we move it here.
     When we move large messages to this queue, we spool them to file
     """
-    unprocessed_receives: deque[_ParsedWSMessage]
+    unprocessed_receives: deque[S2B_Message]
     """If we receive a message but can't set or inform process_task immediately, we move it here, with
     the exception of CONTINUE/CONFIRM messages, which go to unprocessed_acks.
     """
-    expecting_acks: asyncio.Queue[_Acknowledgement]
+    expecting_acks: asyncio.Queue[Union[S2B_ContinueReceive, S2B_ConfirmReceive]]
     """what acknowledgements we expect to receive, in the order we expect to receive them"""
     incoming_notification: Optional[_ReceivingNotify]
     """If the subscriber is streaming us a notification, the current object
@@ -829,68 +724,29 @@ async def _check_training_data(state: _StateOpen) -> _State:
     return state
 
 
-async def _make_receive_stream_message_prefix(
+async def _expect_receive_ack_and_send(
     state: _StateOpen,
-    topic: bytes,
-    compressed_sha512: bytes,
-    msg_identifier: bytes,
+    identifier: bytes,
     part_id: int,
-    dictionary_id: int,
-    compressed_length: int,
-    decompressed_length: int,
-) -> bytes:
-    authorization = await state.broadcaster_config.setup_authorization(
-        url=_make_for_send_websocket_url_and_change_counter(state),
-        topic=topic,
-        message_sha512=compressed_sha512,
-        now=time.time(),
-    )
-    return _make_websocket_message(
-        _ParsedWSMessageFlags.MINIMAL_HEADERS,
-        _OutgoingParsedWSMessageType.RECEIVE_STREAM,
-        [
-            *(
-                [("authorization", authorization.encode("utf-8"))]
-                if authorization is not None
-                else []
-            ),
-            ("x-identifier", msg_identifier),
-            (
-                "x-part-id",
-                part_id.to_bytes(_smallest_unsigned_size(part_id), "big"),
-            ),
-            *(
-                []
-                if part_id != 0
-                else [
-                    ("x-topic", topic),
-                    (
-                        "x-compressor",
-                        dictionary_id.to_bytes(
-                            _smallest_unsigned_size(dictionary_id),
-                            "big",
-                        ),
-                    ),
-                    (
-                        "x-compressed-length",
-                        compressed_length.to_bytes(
-                            _smallest_unsigned_size(compressed_length),
-                            "big",
-                        ),
-                    ),
-                    (
-                        "x-decompressed-length",
-                        decompressed_length.to_bytes(
-                            _smallest_unsigned_size(decompressed_length),
-                            "big",
-                        ),
-                    ),
-                    ("x-compressed-sha512", compressed_sha512),
-                ]
-            ),
-        ],
-        b"",
-    )
+    ws_message: bytes,
+    is_last_part: bool,
+) -> None:
+    if is_last_part:
+        await state.expecting_acks.put(
+            S2B_ConfirmReceive(
+                type=SubscriberToBroadcasterStatefulMessageType.CONFIRM_RECEIVE,
+                identifier=identifier,
+            )
+        )
+    else:
+        await state.expecting_acks.put(
+            S2B_ContinueReceive(
+                type=SubscriberToBroadcasterStatefulMessageType.CONTINUE_RECEIVE,
+                identifier=identifier,
+                part_id=part_id,
+            )
+        )
+    await state.websocket.send_bytes(ws_message)
 
 
 async def _send_large_compressed_message_optimistically(
@@ -914,10 +770,13 @@ async def _send_large_compressed_message_optimistically(
                 size=msg.length, chunk_size=io.DEFAULT_BUFFER_SIZE
             )
             hasher = hashlib.sha512()
-            while True:
-                chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
+            remaining = msg.length
+            while remaining > 0:
+                chunk = msg.stream.read(min(remaining, io.DEFAULT_BUFFER_SIZE))
                 if not chunk:
                     break
+                remaining -= len(chunk)
+                assert remaining >= 0, "read too much data"
 
                 capture_io.write(chunk)
                 for compressed_chunk in chunker.compress(chunk):
@@ -938,66 +797,73 @@ async def _send_large_compressed_message_optimistically(
             compressed_length = compressed_file.tell()
             compressed_file.seek(0)
             msg_identifier = secrets.token_bytes(4)
-            part_id = 0
+            max_ws_message_size = (
+                state.broadcaster_config.outgoing_max_ws_message_size or 2**64 - 1
+            )
+
+            headers = serialize_b2s_receive_stream(
+                B2S_ReceiveStreamStartCompressed(
+                    type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                    authorization=await state.broadcaster_config.setup_authorization(
+                        url=_make_for_send_websocket_url_and_change_counter(state),
+                        topic=msg.topic,
+                        message_sha512=compressed_sha512,
+                        now=time.time(),
+                    ),
+                    identifier=msg_identifier,
+                    part_id=None,
+                    topic=msg.topic,
+                    compressor_id=compressor_id,
+                    compressed_length=compressed_length,
+                    decompressed_length=msg.length,
+                    unverified_compressed_sha512=compressed_sha512,
+                    payload=b"",
+                ),
+                minimal_headers=True,
+            )
+            remaining_space = max(512, max_ws_message_size - len(headers))
+            part = compressed_file.read(remaining_space)
+            is_last_part = len(part) == compressed_length
+            await _expect_receive_ack_and_send(
+                state, msg_identifier, 0, headers + part, is_last_part
+            )
+
+            if is_last_part:
+                return
+
+            part_id = 1
 
             while True:
-                headers = await _make_receive_stream_message_prefix(
-                    state,
-                    msg.topic,
-                    compressed_sha512,
-                    msg_identifier,
-                    part_id,
-                    compressor_id,
-                    compressed_length,
-                    msg.length,
+                headers = serialize_b2s_receive_stream(
+                    B2S_ReceiveStreamContinuation(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=await state.broadcaster_config.setup_authorization(
+                            url=_make_for_send_websocket_url_and_change_counter(state),
+                            topic=msg.topic,
+                            message_sha512=compressed_sha512,
+                            now=time.time(),
+                        ),
+                        identifier=msg_identifier,
+                        part_id=part_id,
+                        payload=b"",
+                    ),
+                    minimal_headers=True,
                 )
 
-                remaining_space = (
-                    max(
-                        512,
-                        state.broadcaster_config.outgoing_max_ws_message_size
-                        - len(headers),
-                    )
-                    if state.broadcaster_config.outgoing_max_ws_message_size is not None
-                    else compressed_length
-                )
+                remaining_space = max(512, max_ws_message_size - len(headers))
                 part = compressed_file.read(remaining_space)
-                if not part:
+                assert part, "incremented auth url already but no part data?"
+
+                is_last_part = compressed_file.tell() >= compressed_length
+                await _expect_receive_ack_and_send(
+                    state, msg_identifier, part_id, headers + part, is_last_part
+                )
+                if is_last_part:
                     break
 
-                if compressed_file.tell() < compressed_length:
-                    await state.expecting_acks.put(
-                        _ContinueReceive(
-                            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
-                            identifier=msg_identifier,
-                            part_id=part_id,
-                        )
-                    )
-                else:
-                    await state.expecting_acks.put(
-                        _ConfirmReceive(
-                            type=_ParsedWSMessageType.CONFIRM_RECEIVE,
-                            identifier=msg_identifier,
-                        )
-                    )
-
-                await state.websocket.send_bytes(headers + part)
                 part_id += 1
     finally:
         capture_io.close()
-
-
-async def _expect_ack_and_send(
-    state: _StateOpen, identifier: bytes, part_id: int, ws_message: bytes
-) -> None:
-    await state.expecting_acks.put(
-        _ContinueReceive(
-            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
-            identifier=identifier,
-            part_id=part_id,
-        )
-    )
-    await state.websocket.send_bytes(ws_message)
 
 
 async def _send_large_message_optimistically(
@@ -1045,53 +911,83 @@ async def _send_large_message_optimistically(
 
         sender: Optional[asyncio.Task[None]] = None
         msg_identifier = secrets.token_bytes(4)
-        part_id = 0
-        max_ws_msg_size = (
-            2**64 - 1
-            if state.broadcaster_config.outgoing_max_ws_message_size is None
-            else state.broadcaster_config.outgoing_max_ws_message_size
+        max_ws_message_size = (
+            state.broadcaster_config.outgoing_max_ws_message_size or 2**64 - 1
         )
+
         sent_so_far = 0
+        part_id = 0
         while True:
-            headers = await _make_receive_stream_message_prefix(
-                state,
-                msg.topic,
-                msg.sha512,
-                msg_identifier,
-                part_id,
-                0,
-                msg.length,
-                msg.length,
+            authorization = await state.broadcaster_config.setup_authorization(
+                url=_make_for_send_websocket_url_and_change_counter(state),
+                topic=msg.topic,
+                message_sha512=msg.sha512,
+                now=time.time(),
+            )
+            headers = serialize_b2s_receive_stream(
+                (
+                    B2S_ReceiveStreamStartUncompressed(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=None,
+                        topic=msg.topic,
+                        compressor_id=None,
+                        uncompressed_length=msg.length,
+                        unverified_uncompressed_sha512=msg.sha512,
+                        payload=b"",
+                    )
+                    if part_id == 0
+                    else B2S_ReceiveStreamContinuation(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=part_id,
+                        payload=b"",
+                    )
+                ),
+                minimal_headers=True,
             )
 
-            remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
+            remaining_ws_msg_space = min(
+                msg.length - sent_so_far, max(512, max_ws_message_size - len(headers))
+            )
+            chunk = (
+                b""
+                if remaining_ws_msg_space == 0
+                else msg.stream.read(remaining_ws_msg_space)
+            )
 
-            chunk = msg.stream.read(remaining_ws_msg_space)
-            if not chunk:
-                msg.finished.set()
-                spool_timeout.cancel()
-                return
-
-            capture_io.write(chunk)
+            if chunk:
+                capture_io.write(chunk)
 
             sent_so_far += len(chunk)
             if sent_so_far > msg.length:
-                raise ValueError("sent too much data")
-
-            if sent_so_far == msg.length:
                 msg.finished.set()
                 spool_timeout.cancel()
-                await state.expecting_acks.put(
-                    _ConfirmReceive(
-                        type=_ParsedWSMessageType.CONFIRM_RECEIVE,
-                        identifier=msg_identifier,
-                    )
+                raise ValueError("read too much data")
+            elif sent_so_far == msg.length:
+                msg.finished.set()
+                spool_timeout.cancel()
+                await _expect_receive_ack_and_send(
+                    state,
+                    msg_identifier,
+                    part_id,
+                    headers + chunk,
+                    True,
                 )
-                await state.websocket.send_bytes(headers + chunk)
                 return
+            else:
+                assert chunk, "did not read enough data"
 
             sender = asyncio.create_task(
-                _expect_ack_and_send(state, msg_identifier, part_id, headers + chunk)
+                _expect_receive_ack_and_send(
+                    state,
+                    msg_identifier,
+                    part_id,
+                    headers + chunk,
+                    False,
+                )
             )
             part_id += 1
             await asyncio.wait(
@@ -1108,14 +1004,22 @@ async def _send_large_message_optimistically(
         assert sender is not None, "impossible"
 
         with tempfile.TemporaryFile("w+b", buffering=-1) as target:
+            remaining_from_stream = msg.length - sent_so_far
+            assert remaining_from_stream > 0, "impossible"
             while True:
-                chunk = msg.stream.read(io.DEFAULT_BUFFER_SIZE)
+                chunk = msg.stream.read(
+                    min(io.DEFAULT_BUFFER_SIZE, remaining_from_stream)
+                )
                 if not chunk:
                     break
+                remaining_from_stream -= len(chunk)
 
                 capture_io.write(chunk)
                 target.write(chunk)
                 await asyncio.sleep(0)
+                if remaining_from_stream <= 0:
+                    assert remaining_from_stream == 0, "read too much data"
+                    break
 
             msg.finished.set()
             target.seek(0)
@@ -1123,43 +1027,39 @@ async def _send_large_message_optimistically(
             await sender
 
             while True:
-                headers = await _make_receive_stream_message_prefix(
-                    state,
-                    msg.topic,
-                    msg.sha512,
-                    msg_identifier,
-                    part_id,
-                    0,
-                    msg.length,
-                    msg.length,
+                headers = serialize_b2s_receive_stream(
+                    B2S_ReceiveStreamContinuation(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=await state.broadcaster_config.setup_authorization(
+                            url=_make_for_send_websocket_url_and_change_counter(state),
+                            topic=msg.topic,
+                            message_sha512=msg.sha512,
+                            now=time.time(),
+                        ),
+                        identifier=msg_identifier,
+                        part_id=part_id,
+                        payload=b"",
+                    ),
+                    minimal_headers=True,
                 )
 
-                remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
+                remaining_ws_msg_space = max(512, max_ws_message_size - len(headers))
                 part = target.read(remaining_ws_msg_space)
-                if not part:
-                    break
+                assert part, "read too little data (already incremented url)"
 
                 sent_so_far += len(chunk)
                 if sent_so_far > msg.length:
                     raise ValueError("sent too much data")
 
+                await _expect_receive_ack_and_send(
+                    state,
+                    msg_identifier,
+                    part_id,
+                    headers + part,
+                    sent_so_far == msg.length,
+                )
                 if sent_so_far == msg.length:
-                    await state.expecting_acks.put(
-                        _ConfirmReceive(
-                            type=_ParsedWSMessageType.CONFIRM_RECEIVE,
-                            identifier=msg_identifier,
-                        )
-                    )
-                else:
-                    await state.expecting_acks.put(
-                        _ContinueReceive(
-                            type=_ParsedWSMessageType.CONTINUE_RECEIVE,
-                            identifier=msg_identifier,
-                            part_id=part_id,
-                        )
-                    )
-
-                await state.websocket.send_bytes(headers + part)
+                    return
                 part_id += 1
     finally:
         capture_io.close()
@@ -1201,39 +1101,68 @@ async def _send_large_message_from_spooled(
             if state.broadcaster_config.outgoing_max_ws_message_size is None
             else state.broadcaster_config.outgoing_max_ws_message_size
         )
+        sent_so_far = 0
         while True:
-            headers = await _make_receive_stream_message_prefix(
-                state,
-                msg.topic,
-                msg.sha512,
-                msg_identifier,
-                part_id,
-                0,
-                msg.length,
-                msg.length,
+            authorization = await state.broadcaster_config.setup_authorization(
+                url=_make_for_send_websocket_url_and_change_counter(state),
+                topic=msg.topic,
+                message_sha512=msg.sha512,
+                now=time.time(),
+            )
+            headers = serialize_b2s_receive_stream(
+                (
+                    B2S_ReceiveStreamStartUncompressed(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=None,
+                        topic=msg.topic,
+                        compressor_id=None,
+                        uncompressed_length=msg.length,
+                        unverified_uncompressed_sha512=msg.sha512,
+                        payload=b"",
+                    )
+                    if part_id == 0
+                    else B2S_ReceiveStreamContinuation(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=part_id,
+                        payload=b"",
+                    )
+                ),
+                minimal_headers=True,
             )
 
-            remaining_ws_msg_space = max(512, max_ws_msg_size - len(headers))
+            remaining_ws_msg_space = min(
+                msg.length - sent_so_far, max(512, max_ws_msg_size - len(headers))
+            )
+            chunk = (
+                b""
+                if remaining_ws_msg_space == 0
+                else msg.stream.read(remaining_ws_msg_space)
+            )
+            assert part_id == 0 or chunk, "did not read enough data"
 
-            chunk = msg.stream.read(remaining_ws_msg_space)
-            if not chunk:
+            if chunk:
+                capture_io.write(chunk)
+                sent_so_far += len(chunk)
+
+                if sent_so_far > msg.length:
+                    msg.finished.set()
+                    raise ValueError("read too much data")
+
+            await _expect_receive_ack_and_send(
+                state,
+                msg_identifier,
+                part_id,
+                headers + chunk,
+                sent_so_far == msg.length,
+            )
+            if sent_so_far == msg.length:
                 msg.finished.set()
                 return
 
-            capture_io.write(chunk)
-            await state.expecting_acks.put(
-                _ContinueReceive(
-                    type=_ParsedWSMessageType.CONTINUE_RECEIVE,
-                    identifier=msg_identifier,
-                    part_id=part_id,
-                )
-                if msg.stream.tell() < msg.length
-                else _ConfirmReceive(
-                    type=_ParsedWSMessageType.CONFIRM_RECEIVE,
-                    identifier=msg_identifier,
-                )
-            )
-            await state.websocket.send_bytes(headers + chunk)
             part_id += 1
     finally:
         capture_io.close()
@@ -1308,81 +1237,94 @@ async def _send_small_message(state: _StateOpen, msg: _SmallMessage) -> None:
         compressed_sha512 = hashlib.sha512(remaining).digest()
 
     compressed_length = len(remaining)
+    max_ws_msg_size = (
+        2**64 - 1
+        if state.broadcaster_config.outgoing_max_ws_message_size is None
+        else state.broadcaster_config.outgoing_max_ws_message_size
+    )
 
-    while remaining:
-        headers = await _make_receive_stream_message_prefix(
-            state,
-            msg.topic,
-            compressed_sha512,
-            msg_identifier,
-            part_id,
-            compressor_id,
-            compressed_length,
-            decompressed_length,
+    while True:
+        authorization = await state.broadcaster_config.setup_authorization(
+            url=_make_for_send_websocket_url_and_change_counter(state),
+            topic=msg.topic,
+            message_sha512=msg.sha512,
+            now=time.time(),
         )
 
-        remaining_space = (
-            len(remaining)
-            if state.broadcaster_config.outgoing_max_ws_message_size is None
-            else max(
-                512,
-                state.broadcaster_config.outgoing_max_ws_message_size - len(headers),
+        if part_id == 0:
+            if compressor_id == 0:
+                headers = serialize_b2s_receive_stream(
+                    B2S_ReceiveStreamStartUncompressed(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=None,
+                        topic=msg.topic,
+                        compressor_id=None,
+                        uncompressed_length=decompressed_length,
+                        unverified_uncompressed_sha512=msg.sha512,
+                        payload=b"",
+                    ),
+                    minimal_headers=True,
+                )
+            else:
+                headers = serialize_b2s_receive_stream(
+                    B2S_ReceiveStreamStartCompressed(
+                        type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                        authorization=authorization,
+                        identifier=msg_identifier,
+                        part_id=None,
+                        topic=msg.topic,
+                        compressor_id=compressor_id,
+                        compressed_length=compressed_length,
+                        decompressed_length=decompressed_length,
+                        unverified_compressed_sha512=compressed_sha512,
+                        payload=b"",
+                    ),
+                    minimal_headers=True,
+                )
+        else:
+            B2S_ReceiveStreamContinuation(
+                type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
+                authorization=authorization,
+                identifier=msg_identifier,
+                part_id=part_id,
+                payload=b"",
             )
-        )
+
+        remaining_space = max(512, max_ws_msg_size - len(headers))
         part, remaining = (
             remaining[:remaining_space],
             remaining[remaining_space:],
         )
-        if remaining:
-            await state.expecting_acks.put(
-                _ContinueReceive(
-                    type=_ParsedWSMessageType.CONTINUE_RECEIVE,
-                    identifier=msg_identifier,
-                    part_id=part_id,
-                )
-            )
-        else:
-            await state.expecting_acks.put(
-                _ConfirmReceive(
-                    type=_ParsedWSMessageType.CONFIRM_RECEIVE,
-                    identifier=msg_identifier,
-                )
-            )
-        await state.websocket.send_bytes(headers + part)
+        await _expect_receive_ack_and_send(
+            state, msg_identifier, part_id, headers + part, not remaining
+        )
+        if not remaining:
+            break
         part_id += 1
 
 
-async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> None:
-    assert message.type == _ParsedWSMessageType.CONFIGURE
+async def _process_configure(state: _StateOpen, message: S2B_Message) -> None:
+    assert message.type == SubscriberToBroadcasterStatefulMessageType.CONFIGURE
     if state.socket_level_config is not None:
         raise ValueError("configuration already set")
 
-    subscriber_nonce = message.headers["x-subscriber-nonce"]
-    if len(subscriber_nonce) != 32:
-        raise ValueError("subscriber nonce must be 32 bytes")
-
-    enable_zstd = message.headers.get("x-enable-zstd", b"\x00") == b"\x01"
-    enable_training = message.headers.get("x-enable-training", b"\x00") == b"\x01"
-    dictionary_id_bytes = message.headers.get("x-initial-dict", b"\x00")
-
-    if enable_training and not enable_zstd:
+    if message.enable_training and not message.enable_zstd:
         raise ValueError("training requires zstd")
 
-    if len(dictionary_id_bytes) > 2:
-        raise ValueError("initial dict must be at most 2 bytes")
-
-    dictionary_id = int.from_bytes(dictionary_id_bytes, "big")
-
     broadcaster_nonce = secrets.token_bytes(32)
-    connection_nonce = hashlib.sha256(subscriber_nonce + broadcaster_nonce).digest()
+    connection_nonce = hashlib.sha256(
+        message.subscriber_nonce + broadcaster_nonce
+    ).digest()
     state.socket_level_config = _Configuration(
-        enable_zstd=enable_zstd,
-        enable_training=enable_training,
-        dictionary_id=dictionary_id,
+        enable_zstd=message.enable_zstd,
+        enable_training=message.enable_training,
+        dictionary_id=message.initial_dict,
         nonce_b64=base64.urlsafe_b64encode(connection_nonce).decode("ascii"),
     )
 
-    if not enable_training and state.training_data is not None:
+    if not message.enable_training and state.training_data is not None:
         if state.training_data.type == _CompressorTrainingInfoType.BEFORE_LOW_WATERMARK:
             state.training_data.collector.tmpfile.close()
         if (
@@ -1392,7 +1334,7 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
             state.training_data.collector.tmpfile.close()
         state.training_data = None
 
-    if enable_zstd:
+    if message.enable_zstd:
 
         async def _make_standard_compressor() -> _CompressorReady:
             return _CompressorReady(
@@ -1418,19 +1360,19 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
         )
 
     if (
-        dictionary_id != 0  # "no compression"
-        and dictionary_id != 1  # reserved for not using a dictionary
-        and enable_zstd
+        message.initial_dict != 0  # "no compression"
+        and message.initial_dict != 1  # reserved for not using a dictionary
+        and message.enable_zstd
         and state.broadcaster_config.compression_allowed
         and (
             state.active_compressor is None
-            or dictionary_id != state.active_compressor.dictionary_id
+            or message.initial_dict != state.active_compressor.dictionary_id
         )
     ):
 
         async def _make_compressor() -> _CompressorReady:
             requested = await state.broadcaster_config.get_compression_dictionary_by_id(
-                dictionary_id
+                message.initial_dict
             )
             if requested is None:
                 raise ValueError("dictionary not found")
@@ -1439,7 +1381,7 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
 
             return _CompressorReady(
                 type=_CompressorState.READY,
-                dictionary_id=dictionary_id,
+                dictionary_id=message.initial_dict,
                 level=level,
                 data=zdict,
                 compressor=zstandard.ZstdCompressor(
@@ -1459,7 +1401,7 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
             state,
             _CompressorPreparing(
                 type=_CompressorState.PREPARING,
-                dictionary_id=dictionary_id,
+                dictionary_id=message.initial_dict,
                 task=asyncio.create_task(_make_compressor()),
             ),
         )
@@ -1469,11 +1411,12 @@ async def _process_configure(state: _StateOpen, message: _ParsedWSMessage) -> No
     state.pending_sends.append(
         _FormattedMessage(
             type=_MessageType.FORMATTED,
-            websocket_data=_make_websocket_message(
-                message.flags,
-                _OutgoingParsedWSMessageType.CONFIRM_CONFIGURE,
-                [("x-broadcaster-nonce", broadcaster_nonce)],
-                b"",
+            websocket_data=serialize_b2s_confirm_configure(
+                B2S_ConfirmConfigure(
+                    type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_CONFIGURE,
+                    broadcaster_nonce=broadcaster_nonce,
+                ),
+                minimal_headers=True,
             ),
         )
     )
@@ -1485,74 +1428,40 @@ async def _acknowledge_compressor_ready(
     if compressor.dictionary_id <= 1:
         return state
 
-    is_preset = compressor.dictionary_id < 65536
-
-    headers = _make_websocket_message(
-        _ParsedWSMessageFlags.MINIMAL_HEADERS,
-        (
-            _OutgoingParsedWSMessageType.ENABLE_ZSTD_PRESET
-            if is_preset
-            else _OutgoingParsedWSMessageType.ENABLE_ZSTD_CUSTOM
-        ),
-        [
-            (
-                "x-identifier",
-                compressor.dictionary_id.to_bytes(
-                    _smallest_unsigned_size(compressor.dictionary_id),
-                    "big",
-                ),
-            ),
-            (
-                "x-compression-level",
-                compressor.level.to_bytes(
-                    _smallest_unsigned_size(compressor.level),
-                    "big",
-                ),
-            ),
-            (
-                "x-min-size",
-                (
-                    state.broadcaster_config.compression_min_size.to_bytes(4, "big")
-                    if compressor.dictionary_id > 1
-                    else state.broadcaster_config.compression_trained_max_size.to_bytes(
-                        4, "big"
-                    )
-                ),
-            ),
-            (
-                "x-max-size",
-                (
-                    state.broadcaster_config.compression_trained_max_size.to_bytes(
-                        _smallest_unsigned_size(
-                            state.broadcaster_config.compression_trained_max_size
-                        ),
-                        "big",
-                    )
-                    if compressor.dictionary_id > 1
-                    else (2**64 - 1).to_bytes(8, "big")
-                ),
-            ),
-        ],
-        b"",
-    )
-
-    if not is_preset:
+    if compressor.dictionary_id >= 65536:
         assert compressor.data is not None, "custom compressor without custom dict?"
         dict_data_bytes = compressor.data.as_bytes()
+        message = serialize_b2s_enable_zstd_custom(
+            B2S_EnableZstdCustom(
+                type=BroadcasterToSubscriberStatefulMessageType.ENABLE_ZSTD_CUSTOM,
+                identifier=compressor.dictionary_id,
+                compression_level=compressor.level,
+                min_size=state.broadcaster_config.compression_min_size,
+                max_size=state.broadcaster_config.compression_trained_max_size,
+                dictionary=dict_data_bytes,
+            ),
+            minimal_headers=True,
+        )
         if (
             state.broadcaster_config.outgoing_max_ws_message_size is not None
-            and len(headers) + len(dict_data_bytes)
-            > state.broadcaster_config.outgoing_max_ws_message_size
+            and len(message) > state.broadcaster_config.outgoing_max_ws_message_size
         ):
             raise ValueError(
                 f"cannot transfer {len(dict_data_bytes)} byte dictionary with "
                 f"{state.broadcaster_config.outgoing_max_ws_message_size} byte max "
-                f"outgoing websocket message size ({len(headers)} bytes needed for headers)"
+                f"outgoing websocket message size (requires {len(message)} bytes)"
             )
-
-        message = headers + dict_data_bytes
     else:
-        message = headers
+        message = serialize_b2s_enable_zstd_preset(
+            B2S_EnableZstdPreset(
+                type=BroadcasterToSubscriberStatefulMessageType.ENABLE_ZSTD_PRESET,
+                identifier=compressor.dictionary_id,
+                compression_level=compressor.level,
+                min_size=state.broadcaster_config.compression_min_size,
+                max_size=state.broadcaster_config.compression_trained_max_size,
+            ),
+            minimal_headers=True,
+        )
 
     if state.send_task is None:
         state.send_task = asyncio.create_task(state.websocket.send_bytes(message))
@@ -1563,105 +1472,151 @@ async def _acknowledge_compressor_ready(
     return state
 
 
-async def _process_subscribe_or_unsubscribe(
-    state: _StateOpen, message: _ParsedWSMessage
+async def _process_subscribe_or_unsubscribe_exact(
+    state: _StateOpen, message: S2B_Message
 ) -> None:
     assert (
-        message.type == _ParsedWSMessageType.SUBSCRIBE_EXACT
-        or message.type == _ParsedWSMessageType.UNSUBSCRIBE_EXACT
-        or message.type == _ParsedWSMessageType.SUBSCRIBE_GLOB
-        or message.type == _ParsedWSMessageType.UNSUBSCRIBE_GLOB
+        message.type == SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT
+        or message.type == SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_EXACT
     )
-
-    authorization_bytes = message.headers.get("authorization")
-    authorization = (
-        None if not authorization_bytes else authorization_bytes.decode("utf-8")
-    )
-
-    is_exact = message.type in (
-        _ParsedWSMessageType.SUBSCRIBE_EXACT,
-        _ParsedWSMessageType.UNSUBSCRIBE_EXACT,
-    )
-    target_bytes = message.headers["x-topic"] if is_exact else message.headers["x-glob"]
 
     url = _make_for_receive_websocket_url_and_change_counter(state)
 
     auth_at = time.time()
-    if is_exact:
-        auth_result = await state.broadcaster_config.is_subscribe_exact_allowed(
-            url=url,
-            exact=target_bytes,
-            now=auth_at,
-            authorization=authorization,
-        )
-    else:
-        auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
-            url=url,
-            glob=target_bytes.decode("utf-8"),
-            now=auth_at,
-            authorization=authorization,
-        )
+    auth_result = await state.broadcaster_config.is_subscribe_exact_allowed(
+        url=url,
+        exact=message.topic,
+        now=auth_at,
+        authorization=message.authorization,
+    )
 
     if auth_result != "ok":
         raise Exception(auth_result)
 
-    if message.type == _ParsedWSMessageType.SUBSCRIBE_EXACT:
-        if target_bytes in state.my_receiver.exact_subscriptions:
-            raise Exception(f"already subscribed to {target_bytes!r}")
+    if message.type == SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT:
+        if message.topic in state.my_receiver.exact_subscriptions:
+            raise Exception(f"already subscribed to {message.topic!r}")
 
-        state.my_receiver.exact_subscriptions.add(target_bytes)
-        await state.receiver.increment_exact(target_bytes)
-        response = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_EXACT,
-            headers=[("x-topic", target_bytes)],
-            body=b"",
-        )
-    elif message.type == _ParsedWSMessageType.UNSUBSCRIBE_EXACT:
-        try:
-            state.my_receiver.exact_subscriptions.remove(target_bytes)
-        except KeyError:
-            raise Exception(f"not subscribed to {target_bytes!r}")
-
-        await state.receiver.decrement_exact(target_bytes)
-        response = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
-            headers=[("x-topic", target_bytes)],
-            body=b"",
-        )
-    elif message.type == _ParsedWSMessageType.SUBSCRIBE_GLOB:
-        target_str = target_bytes.decode("utf-8")
-        if any(target_str == glob for _, glob in state.my_receiver.glob_subscriptions):
-            raise Exception(f"already subscribed to {target_str}")
-
-        glob_regex = re.compile(translate(target_str))
-        state.my_receiver.glob_subscriptions.append((glob_regex, target_str))
-        await state.receiver.increment_glob(target_str)
-        response = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
-            headers=[("x-glob", target_str.encode("utf-8"))],
-            body=b"",
+        state.my_receiver.exact_subscriptions.add(message.topic)
+        await state.receiver.increment_exact(message.topic)
+        response = serialize_b2s_confirm_subscribe_exact(
+            B2S_ConfirmSubscribeExact(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_SUBSCRIBE_EXACT,
+                topic=message.topic,
+            ),
+            minimal_headers=True,
         )
     else:
-        target_str = target_bytes.decode("utf-8")
-        subscription_idx: Optional[int] = None
-        for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions):
-            if glob == target_str:
-                subscription_idx = idx
-                break
+        try:
+            state.my_receiver.exact_subscriptions.remove(message.topic)
+        except KeyError:
+            raise Exception(f"not subscribed to {message.topic!r}")
 
-        if subscription_idx is None:
-            raise Exception(f"not subscribed to {target_str}")
+        await state.receiver.decrement_exact(message.topic)
+        response = serialize_b2s_confirm_unsubscribe_exact(
+            B2S_ConfirmUnsubscribeExact(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_UNSUBSCRIBE_EXACT,
+                topic=message.topic,
+            ),
+            minimal_headers=True,
+        )
+    # elif message.type == _ParsedWSMessageType.SUBSCRIBE_GLOB:
+    #     target_str = target_bytes.decode("utf-8")
+    #     if any(target_str == glob for _, glob in state.my_receiver.glob_subscriptions):
+    #         raise Exception(f"already subscribed to {target_str}")
+
+    #     glob_regex = re.compile(translate(target_str))
+    #     state.my_receiver.glob_subscriptions.append((glob_regex, target_str))
+    #     await state.receiver.increment_glob(target_str)
+    #     response = _make_websocket_message(
+    #         flags=message.flags,
+    #         message_type=_OutgoingParsedWSMessageType.CONFIRM_SUBSCRIBE_GLOB,
+    #         headers=[("x-glob", target_str.encode("utf-8"))],
+    #         body=b"",
+    #     )
+    # else:
+    #     target_str = target_bytes.decode("utf-8")
+    #     subscription_idx: Optional[int] = None
+    #     for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions):
+    #         if glob == target_str:
+    #             subscription_idx = idx
+    #             break
+
+    #     if subscription_idx is None:
+    #         raise Exception(f"not subscribed to {target_str}")
+
+    #     state.my_receiver.glob_subscriptions.pop(subscription_idx)
+    #     await state.receiver.decrement_glob(target_str)
+    #     response = _make_websocket_message(
+    #         flags=message.flags,
+    #         message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
+    #         headers=[("x-glob", target_str.encode("utf-8"))],
+    #         body=b"",
+    #     )
+
+    if state.send_task is None:
+        state.send_task = asyncio.create_task(state.websocket.send_bytes(response))
+    else:
+        state.pending_sends.append(
+            _FormattedMessage(type=_MessageType.FORMATTED, websocket_data=response)
+        )
+
+
+async def _process_subscribe_or_unsubscribe_glob(
+    state: _StateOpen, message: S2B_Message
+) -> None:
+    assert (
+        message.type == SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_GLOB
+        or message.type == SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_GLOB
+    )
+
+    url = _make_for_receive_websocket_url_and_change_counter(state)
+
+    auth_at = time.time()
+    auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
+        url=url,
+        glob=message.glob,
+        now=auth_at,
+        authorization=message.authorization,
+    )
+
+    if auth_result != "ok":
+        raise Exception(auth_result)
+
+    if message.type == SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_GLOB:
+        if any(
+            message.glob == glob for _, glob in state.my_receiver.glob_subscriptions
+        ):
+            raise Exception(f"already subscribed to {message.glob!r}")
+
+        glob_regex = re.compile(translate(message.glob))
+        state.my_receiver.glob_subscriptions.append((glob_regex, message.glob))
+        await state.receiver.increment_glob(message.glob)
+        response = serialize_b2s_confirm_subscribe_glob(
+            B2S_ConfirmSubscribeGlob(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_SUBSCRIBE_GLOB,
+                glob=message.glob,
+            ),
+            minimal_headers=True,
+        )
+    else:
+        try:
+            subscription_idx = next(
+                idx
+                for idx, (_, glob) in enumerate(state.my_receiver.glob_subscriptions)
+                if glob == message.glob
+            )
+        except StopIteration:
+            raise Exception(f"not subscribed to {message.glob!r}")
 
         state.my_receiver.glob_subscriptions.pop(subscription_idx)
-        await state.receiver.decrement_glob(target_str)
-        response = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
-            headers=[("x-glob", target_str.encode("utf-8"))],
-            body=b"",
+        await state.receiver.decrement_glob(message.glob)
+        response = serialize_b2s_confirm_unsubscribe_glob(
+            B2S_ConfirmUnsubscribeGlob(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_UNSUBSCRIBE_GLOB,
+                glob=message.glob,
+            ),
+            minimal_headers=True,
         )
 
     if state.send_task is None:
@@ -1672,100 +1627,64 @@ async def _process_subscribe_or_unsubscribe(
         )
 
 
-async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
-    assert message.type == _ParsedWSMessageType.NOTIFY
+async def _process_notify(state: _StateOpen, message: S2B_Message) -> None:
+    assert message.type == SubscriberToBroadcasterStatefulMessageType.NOTIFY
     if state.socket_level_config is None:
         raise Exception("notify before configure")
 
-    authorization_bytes = message.headers.get("authorization")
-    authorization = (
-        None if not authorization_bytes else authorization_bytes.decode("utf-8")
-    )
-
-    message_id = message.headers["x-identifier"]
-    if len(message_id) > 64:
-        raise ValueError("x-identifier max 64 bytes")
-
-    topic = message.headers["x-topic"]
-
-    compressor_id_bytes = message.headers.get("x-compressor", b"\x00")
-    if len(compressor_id_bytes) > 8:
-        raise ValueError("x-compressor max 8 bytes")
-
-    compressor_id = int.from_bytes(compressor_id_bytes, "big")
-
-    if compressor_id != 0 and (
+    if message.compressor_id is not None and (
         not state.broadcaster_config.compression_allowed
         or not state.socket_level_config.enable_zstd
     ):
         raise ValueError("compression used but compression is forbidden")
 
-    compressed_length_bytes = message.headers["x-compressed-length"]
-    if len(compressed_length_bytes) > 8:
-        raise ValueError("compressed length max 8 bytes")
-
-    compressed_length = int.from_bytes(compressed_length_bytes, "big")
-
-    decompressed_length_bytes = message.headers["x-decompressed-length"]
-    if len(decompressed_length_bytes) > 8:
-        raise ValueError("decompressed length max 8 bytes")
-
-    decompressed_length = int.from_bytes(decompressed_length_bytes, "big")
-
-    compressed_sha512 = message.headers["x-compressed-sha512"]
-    if len(compressed_sha512) != 64:
-        raise ValueError("compressed sha512 must be 64 bytes")
-
     auth_result = await state.broadcaster_config.is_notify_allowed(
-        topic=topic,
-        message_sha512=compressed_sha512,
+        topic=message.topic,
+        message_sha512=(
+            message.verified_compressed_sha512
+            if message.compressor_id is not None
+            else message.verified_uncompressed_sha512
+        ),
         now=time.time(),
-        authorization=authorization,
+        authorization=message.authorization,
     )
     if auth_result != "ok":
         raise Exception(auth_result)
 
-    if len(message.body) != compressed_length:
-        raise ValueError("compressed length is incorrect")
-
-    real_compressed_sha512 = hashlib.sha512(message.body).digest()
-    if real_compressed_sha512 != compressed_sha512:
-        raise Exception("integrity check failed")
-
     decompressor: Optional[_Compressor]
-    if compressor_id == 0:
+    if message.compressor_id is None:
         decompressor = None
     elif (
         state.standard_compressor is not None
-        and compressor_id == state.standard_compressor.dictionary_id
+        and message.compressor_id == state.standard_compressor.dictionary_id
     ):
         decompressor = state.standard_compressor
     elif (
         state.active_compressor is not None
-        and compressor_id == state.active_compressor.dictionary_id
+        and message.compressor_id == state.active_compressor.dictionary_id
     ):
         decompressor = state.active_compressor
     elif (
         state.last_compressor is not None
-        and compressor_id == state.last_compressor.dictionary_id
+        and message.compressor_id == state.last_compressor.dictionary_id
     ):
         decompressor = state.last_compressor
     else:
         raise ValueError("unrecognized compressor id")
 
     decompressed_data: Optional[SyncIOBaseLikeIO] = None
-    if decompressor is None:
-        _store_small_for_compression_training(state, message.body)
-        decompressed_data = io.BytesIO(message.body)
-        decompressed_sha512 = real_compressed_sha512
-        if len(message.body) != decompressed_length:
-            raise ValueError("decompressed length is incorrect")
+    if message.compressor_id is None:
+        assert decompressor is None, "impossible"
+        _store_small_for_compression_training(state, message.uncompressed_message)
+        decompressed_data = io.BytesIO(message.uncompressed_message)
+        decompressed_length = len(message.uncompressed_message)
     else:
+        assert decompressor is not None, "impossible"
         if decompressor.type == _CompressorState.PREPARING:
             decompressor = await decompressor.task
 
         unseekable_decompressed_data = decompressor.decompressor.stream_reader(
-            message.body
+            message.compressed_message
         )
         decompressed_hasher = hashlib.sha512()
         try:
@@ -1780,7 +1699,7 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
                 decompressed_hasher.update(chunk)
                 await asyncio.sleep(0)
             decompressed_sha512 = decompressed_hasher.digest()
-            if decompressed_data.tell() != decompressed_length:
+            if decompressed_data.tell() != message.decompressed_length:
                 raise ValueError("decompressed length is incorrect")
             decompressed_data.seek(0)
         except BaseException:
@@ -1791,8 +1710,12 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
             unseekable_decompressed_data.close()
 
         try:
-            if _should_store_large_message_for_training(state, decompressed_length):
-                capturer = _make_store_for_training_capturer(state, decompressed_length)
+            if _should_store_large_message_for_training(
+                state, message.decompressed_length
+            ):
+                capturer = _make_store_for_training_capturer(
+                    state, message.decompressed_length
+                )
                 try:
                     while True:
                         chunk = decompressed_data.read(io.DEFAULT_BUFFER_SIZE)
@@ -1809,7 +1732,7 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
 
     try:
         notify_result = await handle_trusted_notify(
-            topic,
+            message.topic,
             decompressed_data,
             config=state.broadcaster_config,
             session=state.client_session,
@@ -1822,19 +1745,13 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
     if notify_result.type == TrustedNotifyResultType.UNAVAILABLE:
         raise Exception("failed to attempt all subscribers")
 
-    to_send = _make_websocket_message(
-        message.flags,
-        _OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
-        [
-            ("x-identifier", message_id),
-            (
-                "x-subscribers",
-                notify_result.succeeded.to_bytes(
-                    _smallest_unsigned_size(notify_result.succeeded), "big"
-                ),
-            ),
-        ],
-        b"",
+    to_send = serialize_b2s_confirm_notify(
+        B2S_ConfirmNotify(
+            type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
+            identifier=message.identifier,
+            subscribers=notify_result.succeeded,
+        ),
+        minimal_headers=True,
     )
 
     if state.send_task is None:
@@ -1845,51 +1762,18 @@ async def _process_notify(state: _StateOpen, message: _ParsedWSMessage) -> None:
         )
 
 
-async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -> None:
-    assert message.type == _ParsedWSMessageType.NOTIFY_STREAM
-
-    message_id = message.headers["x-identifier"]
-    if (
-        state.incoming_notification is not None
-        and state.incoming_notification.identifier != message_id
-    ):
-        raise ValueError("did not finish last message")
-
-    part_id_bytes = message.headers["x-part-id"]
-    if len(part_id_bytes) > 8:
-        raise ValueError("x-part-id max 8 bytes")
-
-    part_id = int.from_bytes(part_id_bytes, "big")
+async def _process_notify_stream(state: _StateOpen, message: S2B_Message) -> None:
+    assert message.type == SubscriberToBroadcasterStatefulMessageType.NOTIFY_STREAM
 
     notif = state.incoming_notification
-    if part_id == 0:
+    if message.part_id is None:
         if notif is not None:
             raise ValueError("did not complete previous message")
-        topic = message.headers["x-topic"]
-        compressor_id_bytes = message.headers["x-compressor"]
-        if len(compressor_id_bytes) > 8:
-            raise ValueError("compressor id max 8 bytes")
-        compressor_id = int.from_bytes(compressor_id_bytes, "big")
-        compressed_length_bytes = message.headers["x-compressed-length"]
-        if len(compressed_length_bytes) > 8:
-            raise ValueError("compressed length max 8 bytes")
-        compressed_length = int.from_bytes(compressed_length_bytes, "big")
-        decompressed_length_bytes = message.headers["x-decompressed-length"]
-        if len(decompressed_length_bytes) > 8:
-            raise ValueError("decompressed length max 8 bytes")
-        decompressed_length = int.from_bytes(decompressed_length_bytes, "big")
-        compressed_sha512 = message.headers["x-compressed-sha512"]
-        if len(compressed_sha512) != 64:
-            raise ValueError("sha512 must be exactly 64 bytes")
 
         notif = _ReceivingNotify(
-            identifier=message_id,
+            identifier=message.identifier,
+            first_part_no_payload=replace_in_dataclass(message, payload=b""),
             last_part_id=-1,
-            topic=topic,
-            compressor_id=compressor_id,
-            compressed_length=compressed_length,
-            decompressed_length=decompressed_length,
-            compressed_sha512=compressed_sha512,
             body_hasher=hashlib.sha512(),
             body=tempfile.SpooledTemporaryFile(
                 max_size=state.broadcaster_config.message_body_spool_size
@@ -1897,39 +1781,50 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
         )
         state.incoming_notification = notif
     else:
-        if notif is None or notif.last_part_id + 1 != part_id:
+        if notif is None or notif.last_part_id + 1 != message.part_id:
             raise ValueError("received part out of order")
 
     # verify we will still be able to decompress this message
-    if notif.compressor_id != 0:
+    if notif.first_part_no_payload.compressor_id is not None:
         if not (
             (
                 state.standard_compressor is not None
-                and state.standard_compressor.dictionary_id == notif.compressor_id
+                and state.standard_compressor.dictionary_id
+                == notif.first_part_no_payload.compressor_id
             )
             or (
                 state.active_compressor is not None
-                and state.active_compressor.dictionary_id == notif.compressor_id
+                and state.active_compressor.dictionary_id
+                == notif.first_part_no_payload.compressor_id
             )
             or (
                 state.last_compressor is not None
-                and state.last_compressor.dictionary_id == notif.compressor_id
+                and state.last_compressor.dictionary_id
+                == notif.first_part_no_payload.compressor_id
             )
         ):
             raise ValueError("unknown compressor id")
 
-    notif.body_hasher.update(message.body)
-    notif.body.write(message.body)
-    compressed_bytes_so_far = notif.body.tell()
-    if compressed_bytes_so_far > notif.compressed_length:
-        raise ValueError("compressed message exceeds indicated length")
+    notif.body_hasher.update(message.payload)
+    notif.body.write(message.payload)
 
-    if compressed_bytes_so_far < notif.compressed_length:
-        ack_message = _make_websocket_message(
-            message.flags,
-            _OutgoingParsedWSMessageType.CONTINUE_NOTIFY,
-            [("x-identifier", notif.identifier), ("x-part-id", part_id_bytes)],
-            b"",
+    expected_number_bytes = (
+        notif.first_part_no_payload.compressed_length
+        if notif.first_part_no_payload.compressor_id is not None
+        else notif.first_part_no_payload.uncompressed_length
+    )
+    actual_number_bytes = notif.body.tell()
+    if actual_number_bytes > expected_number_bytes:
+        raise ValueError("message exceeds indicated length")
+
+    if actual_number_bytes < expected_number_bytes:
+        ack_message = serialize_b2s_continue_notify(
+            B2S_ContinueNotify(
+                type=BroadcasterToSubscriberStatefulMessageType.CONTINUE_NOTIFY,
+                identifier=notif.identifier,
+                part_id=message.part_id or 0,
+            ),
+            minimal_headers=True,
         )
         if state.send_task is None:
             state.send_task = asyncio.create_task(
@@ -1943,34 +1838,45 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
             )
         return
 
-    actual_compressed_sha512 = notif.body_hasher.digest()
-    if actual_compressed_sha512 != notif.compressed_sha512:
+    expected_sha512 = (
+        notif.first_part_no_payload.unverified_compressed_sha512
+        if notif.first_part_no_payload.compressor_id is not None
+        else notif.first_part_no_payload.unverified_uncompressed_sha512
+    )
+    actual_sha512 = notif.body_hasher.digest()
+    if actual_sha512 != expected_sha512:
         raise ValueError("integrity mismatch")
 
     compressor: Optional[_Compressor] = None
     if (
         state.standard_compressor is not None
-        and notif.compressor_id == state.standard_compressor.dictionary_id
+        and notif.first_part_no_payload.compressor_id
+        == state.standard_compressor.dictionary_id
     ):
         compressor = state.standard_compressor
     elif (
         state.active_compressor is not None
-        and notif.compressor_id == state.active_compressor.dictionary_id
+        and notif.first_part_no_payload.compressor_id
+        == state.active_compressor.dictionary_id
     ):
         compressor = state.active_compressor
     elif (
         state.last_compressor is not None
-        and notif.compressor_id == state.last_compressor.dictionary_id
+        and notif.first_part_no_payload.compressor_id
+        == state.last_compressor.dictionary_id
     ):
         compressor = state.last_compressor
-    elif notif.compressor_id != 0:
+    elif notif.first_part_no_payload.compressor_id is not None:
         raise ValueError("unknown compressor id")
 
     if compressor is None:
+        assert notif.first_part_no_payload.compressor_id is None, "impossible"
         notif.body.seek(0)
-        if _should_store_large_message_for_training(state, notif.decompressed_length):
+        if _should_store_large_message_for_training(
+            state, notif.first_part_no_payload.uncompressed_length
+        ):
             capturer = _make_store_for_training_capturer(
-                state, notif.decompressed_length
+                state, notif.first_part_no_payload.uncompressed_length
             )
             try:
                 while True:
@@ -1984,29 +1890,23 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
                 capturer.close()
 
         result = await handle_trusted_notify(
-            notif.topic,
+            notif.first_part_no_payload.topic,
             notif.body,
             config=state.broadcaster_config,
             session=state.client_session,
-            content_length=notif.compressed_length,
-            sha512=notif.compressed_sha512,
+            content_length=notif.first_part_no_payload.uncompressed_length,
+            sha512=notif.first_part_no_payload.unverified_uncompressed_sha512,
         )
         if result.type == TrustedNotifyResultType.UNAVAILABLE:
             raise ValueError("could not attempt all subscribers")
 
-        ack_message = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
-            headers=[
-                ("x-identifier", notif.identifier),
-                (
-                    "x-subscribers",
-                    result.succeeded.to_bytes(
-                        _smallest_unsigned_size(result.succeeded), "big"
-                    ),
-                ),
-            ],
-            body=b"",
+        ack_message = serialize_b2s_confirm_notify(
+            B2S_ConfirmNotify(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
+                identifier=notif.identifier,
+                subscribers=result.succeeded,
+            ),
+            minimal_headers=True,
         )
         if state.send_task is None:
             state.send_task = asyncio.create_task(
@@ -2022,6 +1922,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
         state.incoming_notification = None
         return
 
+    assert notif.first_part_no_payload.compressor_id is not None, "impossible"
     if compressor.type == _CompressorState.PREPARING:
         compressor = await compressor.task
 
@@ -2031,7 +1932,9 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
     ) as target:
         decompressed_hasher = hashlib.sha512()
 
-        capturer = _make_store_for_training_capturer(state, notif.decompressed_length)
+        capturer = _make_store_for_training_capturer(
+            state, notif.first_part_no_payload.decompressed_length
+        )
         try:
             with compressor.decompressor.stream_reader(
                 cast(IO[bytes], notif.body), read_size=io.DEFAULT_BUFFER_SIZE
@@ -2044,7 +1947,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
                     decompressed_hasher.update(chunk)
                     target.write(chunk)
                     capturer.write(chunk)
-                    if target.tell() > notif.decompressed_length:
+                    if target.tell() > notif.first_part_no_payload.decompressed_length:
                         raise ValueError("decompresses to larger than indicated")
 
                     await asyncio.sleep(0)
@@ -2053,7 +1956,7 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
 
         notif.body.close()
 
-        if target.tell() != notif.decompressed_length:
+        if target.tell() != notif.first_part_no_payload.decompressed_length:
             raise ValueError("decompresses to less than indicated")
 
         decompressed_sha512 = decompressed_hasher.digest()
@@ -2061,30 +1964,24 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
         target.seek(0)
 
         result = await handle_trusted_notify(
-            notif.topic,
+            notif.first_part_no_payload.topic,
             target,
             config=state.broadcaster_config,
             session=state.client_session,
-            content_length=notif.decompressed_length,
+            content_length=notif.first_part_no_payload.decompressed_length,
             sha512=decompressed_sha512,
         )
 
         if result.type == TrustedNotifyResultType.UNAVAILABLE:
             raise ValueError("failed to attempt all subscribers")
 
-        ack_message = _make_websocket_message(
-            flags=message.flags,
-            message_type=_OutgoingParsedWSMessageType.CONFIRM_NOTIFY,
-            headers=[
-                ("x-identifier", notif.identifier),
-                (
-                    "x-subscribers",
-                    result.succeeded.to_bytes(
-                        _smallest_unsigned_size(result.succeeded), "big"
-                    ),
-                ),
-            ],
-            body=b"",
+        ack_message = serialize_b2s_confirm_notify(
+            B2S_ConfirmNotify(
+                type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
+                identifier=notif.identifier,
+                subscribers=result.succeeded,
+            ),
+            minimal_headers=True,
         )
         if state.send_task is None:
             state.send_task = asyncio.create_task(
@@ -2100,68 +1997,59 @@ async def _process_notify_stream(state: _StateOpen, message: _ParsedWSMessage) -
 
 
 _PROCESSOR_BY_TYPE: Dict[
-    _ParsedWSMessageType,
-    Callable[[_StateOpen, _ParsedWSMessage], Coroutine[None, None, None]],
+    SubscriberToBroadcasterStatefulMessageType,
+    Callable[[_StateOpen, S2B_Message], Coroutine[None, None, None]],
 ] = {
-    _ParsedWSMessageType.CONFIGURE: _process_configure,
-    _ParsedWSMessageType.SUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe,
-    _ParsedWSMessageType.UNSUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe,
-    _ParsedWSMessageType.SUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe,
-    _ParsedWSMessageType.UNSUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe,
-    _ParsedWSMessageType.NOTIFY: _process_notify,
-    _ParsedWSMessageType.NOTIFY_STREAM: _process_notify_stream,
+    SubscriberToBroadcasterStatefulMessageType.CONFIGURE: _process_configure,
+    SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe_exact,
+    SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_EXACT: _process_subscribe_or_unsubscribe_exact,
+    SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe_glob,
+    SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_GLOB: _process_subscribe_or_unsubscribe_glob,
+    SubscriberToBroadcasterStatefulMessageType.NOTIFY: _process_notify,
+    SubscriberToBroadcasterStatefulMessageType.NOTIFY_STREAM: _process_notify_stream,
 }
 
 
-def _process_message_asap(state: _StateOpen, message: _ParsedWSMessage) -> None:
-    if message.type == _ParsedWSMessageType.CONTINUE_RECEIVE:
-        identifier = message.headers.get("x-identifier")
-        if identifier is None:
-            raise ValueError("continue receive requires identifier")
-
-        part_id_bytes = message.headers.get("x-part-id")
-        if part_id_bytes is None:
-            raise ValueError("continue receive requires part id")
-
-        if len(part_id_bytes) > 8:
-            raise ValueError("part id too long")
-
-        part_id = int.from_bytes(part_id_bytes, "big")
-
+def _process_message_asap(state: _StateOpen, message: S2B_Message) -> None:
+    if message.type == SubscriberToBroadcasterStatefulMessageType.CONTINUE_RECEIVE:
         try:
             expecting_ack = state.expecting_acks.get_nowait()
         except asyncio.QueueEmpty:
             raise ValueError("not expecting ack right now")
 
-        if expecting_ack.type != _ParsedWSMessageType.CONTINUE_RECEIVE:
-            raise ValueError(f"expecting {expecting_ack.type!r}, got {message.type!r}")
+        if (
+            expecting_ack.type
+            != SubscriberToBroadcasterStatefulMessageType.CONTINUE_RECEIVE
+        ):
+            raise ValueError(f"expecting {expecting_ack.type}, got {message.type}")
 
-        if expecting_ack.identifier != identifier:
+        if expecting_ack.identifier != message.identifier:
             raise ValueError(
-                f"expecting {expecting_ack.identifier!r}, got {identifier!r}"
+                f"expecting {expecting_ack.identifier!r}, got {message.identifier!r}"
             )
 
-        if expecting_ack.part_id != part_id:
-            raise ValueError(f"expecting {expecting_ack.part_id}, got {part_id}")
+        if expecting_ack.part_id != message.part_id:
+            raise ValueError(
+                f"expecting {expecting_ack.part_id}, got {message.part_id}"
+            )
 
         return
 
-    if message.type == _ParsedWSMessageType.CONFIRM_RECEIVE:
-        identifier = message.headers.get("x-identifier")
-        if identifier is None:
-            raise ValueError("confirm receive requires identifier")
-
+    if message.type == SubscriberToBroadcasterStatefulMessageType.CONFIRM_RECEIVE:
         try:
             expecting_ack = state.expecting_acks.get_nowait()
         except asyncio.QueueEmpty:
             raise ValueError("not expecting ack right now")
 
-        if expecting_ack.type != _ParsedWSMessageType.CONFIRM_RECEIVE:
+        if (
+            expecting_ack.type
+            != SubscriberToBroadcasterStatefulMessageType.CONFIRM_RECEIVE
+        ):
             raise ValueError(f"expecting {expecting_ack.type}, got {message.type}")
 
-        if expecting_ack.identifier != identifier:
+        if expecting_ack.identifier != message.identifier:
             raise ValueError(
-                f"expecting {expecting_ack.identifier!r}, got {identifier!r}"
+                f"expecting {expecting_ack.identifier!r}, got {message.identifier!r}"
             )
 
         return
@@ -2273,7 +2161,11 @@ async def _handle_open(state: _State) -> _State:
                 )
 
             raw_message = cast(WSMessageBytes, raw_message)
-            parsed_message = _parse_websocket_message(raw_message["bytes"])
+            raw_message_reader = io.BytesIO(raw_message["bytes"])
+            prefix = parse_s2b_message_prefix(raw_message_reader)
+            parsed_message = S2B_AnyMessageParser.parse(
+                prefix.flags, prefix.type, raw_message_reader
+            )
             _process_message_asap(state, parsed_message)
             return state
 
