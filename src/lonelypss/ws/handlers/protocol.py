@@ -1,5 +1,5 @@
-from typing import Generic, Protocol, TypeVar
-from lonelypss.ws.state import State, StateType
+from typing import Protocol
+from lonelypss.ws.state import State
 
 
 class StateHandler(Protocol):
