@@ -576,15 +576,14 @@ class StateOpen:
     """
 
     process_task: Optional[asyncio.Task[None]]
-    """If a task is currently responsible for altering this state, such as writing 
-    to the compressing training data collector or incrementing the url counters,
-    that task, otherwise None to indicate nothing is mutating the state
+    """If a task is currently processing one of the incoming messages, the task that
+    is doing that, otherwise None
     """
 
     unprocessed_messages: deque[S2B_Message]
     """If the broadcaster has received messages from the subscriber that it has not
-    yet processed because the state was locked, the messages that have not been processed
-    in the order they were received.
+    yet processed, the messages that have not been processed in the order they were 
+    received.
 
     basic idea: websocket incoming -> read_task -> unprocessed_messages -> process_task
     """

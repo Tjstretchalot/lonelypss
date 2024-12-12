@@ -239,6 +239,33 @@ class _CompressorTrainingDataCollector:
     will include length prefixes before each sample data
     """
     tmpfile: SyncIOBaseLikeIO
+    """the underlying synchronous file object. whenever an event loop iteration
+    may have passed, this tmpfile may have been arbitrarily seeked, thus it is
+    important that you seek back to where you need to be before writing or
+    reading.
+
+    you must allocate the entire location of any message without yielding to the
+    event loop, but you may temporarily fill with zeros if not all the data is
+    available
+
+    typically, if writing a small message, the flow is:
+    - seek to the end (`seek(0, os.SEEK_END)`)
+    - write the length prefix (`length.to_bytes(4, "big")`)
+    - write the data
+    - yield to the event loop
+
+    for writing a large message, the flow is:
+    - seek to the end (`seek(0, os.SEEK_END)`)
+    - write the length prefix (`length.to_bytes(4, "big")`)
+    - remember the current position (`pos = tell()`)
+    - write zeros for the data
+    - yield to the event loop
+    - when you receive more data:
+      - seek to the position (`seek(pos, os.SEEK_SET)`)
+      - write the data
+      - remember the new position (`pos += len(data)`)
+      - repeat until all data is written
+    """
 
 
 class _CompressorTrainingInfoType(Enum):
