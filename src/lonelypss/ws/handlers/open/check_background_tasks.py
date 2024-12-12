@@ -1,6 +1,6 @@
 import asyncio
 import sys
-from typing import List, Set, cast
+from typing import List, Set, Union, cast
 from lonelypss.ws.handlers.open.check_result import CheckResult
 from lonelypss.ws.state import StateOpen
 
@@ -73,7 +73,7 @@ if sys.version_info < (3, 11):
             return excs[0]
 
         exc = Exception(msg)
-        last_exc = exc
+        last_exc: Union[Exception, BaseException] = exc
 
         for nexc in excs:
             while last_exc.__cause__ is not None:
