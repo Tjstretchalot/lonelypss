@@ -1,6 +1,6 @@
 import asyncio
 from collections import deque
-from typing import TYPE_CHECKING, Iterable, SupportsIndex, Union, cast
+from typing import TYPE_CHECKING, Iterable, List, Optional, SupportsIndex, Union, cast
 from lonelypss.ws.handlers.open.check_background_tasks import check_background_tasks
 from lonelypss.ws.handlers.open.check_compressors import check_compressors
 from lonelypss.ws.handlers.open.check_internal_message_task import (
@@ -10,7 +10,10 @@ from lonelypss.ws.handlers.open.check_process_task import check_process_task
 from lonelypss.ws.handlers.open.check_read_task import check_read_task
 from lonelypss.ws.handlers.open.check_result import CheckResult
 from lonelypss.ws.handlers.open.check_send_task import check_send_task
-from lonelypss.ws.handlers.open.errors import NormalDisconnectException
+from lonelypss.ws.handlers.open.errors import (
+    NormalDisconnectException,
+    combine_multiple_exceptions,
+)
 from lonelypss.ws.handlers.open.processors.processor import process_any
 from lonelypss.ws.state import (
     CompressorState,
@@ -99,7 +102,9 @@ async def handle_open(state: State) -> State:
                 await process_any(state, state.unprocessed_messages.popleft())
 
             raise
-    except BaseException as e:
+    except BaseException as cause_for_cleanup_exc:
+        cleanup_exceptions: List[BaseException] = []
+
         for compressor in state.compressors:
             if compressor.type == CompressorState.PREPARING:
                 compressor.task.cancel()
@@ -111,8 +116,8 @@ async def handle_open(state: State) -> State:
             ):
                 try:
                     state.compressor_training_info.collector.tmpfile.close()
-                except BaseException:
-                    ...
+                except BaseException as e2:
+                    cleanup_exceptions.append(e2)
 
         state.read_task.cancel()
         state.internal_message_task.cancel()
@@ -120,8 +125,8 @@ async def handle_open(state: State) -> State:
         if state.notify_stream_state is not None:
             try:
                 state.notify_stream_state.body.close()
-            except BaseException:
-                ...
+            except BaseException as e2:
+                cleanup_exceptions.append(e2)
 
         if state.send_task is not None:
             state.send_task.cancel()
@@ -133,20 +138,33 @@ async def handle_open(state: State) -> State:
             if msg.type == WaitingInternalMessageType.SPOOLED_LARGE:
                 try:
                     msg.stream.close()
-                except BaseException:
-                    ...
+                except BaseException as e2:
+                    cleanup_exceptions.append(e2)
 
         for task in state.backgrounded:
             task.cancel()
 
         if not _disconnected_receiver:
             _disconnected_receiver = True
-            await _disconnect_receiver(state)
+            try:
+                await _disconnect_receiver(state)
+            except BaseException as e2:
+                cleanup_exceptions.append(e2)
+
+        result_exception: Optional[BaseException] = None
+
+        if cleanup_exceptions:
+            result_exception = combine_multiple_exceptions(
+                "cleaning up from open state", cleanup_exceptions
+            )
+            result_exception.__context__ = cause_for_cleanup_exc
+        elif not isinstance(cause_for_cleanup_exc, NormalDisconnectException):
+            result_exception = cause_for_cleanup_exc
 
         return StateClosing(
             type=StateType.CLOSING,
             websocket=state.websocket,
-            exception=e if not isinstance(e, NormalDisconnectException) else None,
+            exception=result_exception,
         )
 
 
@@ -155,22 +173,29 @@ if TYPE_CHECKING:
 
 
 async def _disconnect_receiver(state: StateOpen) -> None:
+    excs: List[BaseException] = []
+
     try:
         await state.internal_receiver.unregister_receiver(state.my_receiver_id)
-    except BaseException:
-        ...
+    except BaseException as e:
+        excs.append(e)
 
     for topic in state.my_receiver.exact_subscriptions:
         try:
             await state.internal_receiver.decrement_exact(topic)
-        except BaseException:
-            ...
+        except BaseException as e:
+            excs.append(e)
 
     for _, glob in state.my_receiver.glob_subscriptions:
         try:
             await state.internal_receiver.decrement_glob(glob)
-        except BaseException:
-            ...
+        except BaseException as e:
+            excs.append(e)
+
+    if excs:
+        raise combine_multiple_exceptions(
+            "failed to properly disconnect receiver", excs
+        )
 
 
 SendT = Union[WaitingInternalMessage, SimplePendingSendPreFormatted]

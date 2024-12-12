@@ -1,7 +1,7 @@
 import asyncio
-import sys
-from typing import List, Set, Union, cast
+from typing import List, Set
 from lonelypss.ws.handlers.open.check_result import CheckResult
+from lonelypss.ws.handlers.open.errors import combine_multiple_exceptions
 from lonelypss.ws.state import StateOpen
 
 
@@ -37,77 +37,6 @@ async def check_background_tasks(state: StateOpen) -> CheckResult:
             excs.append(e)
 
     if excs:
-        raise _combine_multiple_exceptions("error in background task", excs)
+        raise combine_multiple_exceptions("error in background task", excs)
 
     return CheckResult.RESTART
-
-
-if sys.version_info < (3, 11):
-
-    def _combine_multiple_base_exceptions(
-        msg: str, excs: List[BaseException]
-    ) -> BaseException:
-        if not excs:
-            raise ValueError("no exceptions to combine")
-
-        if len(excs) == 1:
-            return excs[0]
-
-        exc = BaseException(msg)
-        last_exc = exc
-
-        for nexc in excs:
-            while last_exc.__cause__ is not None:
-                last_exc = last_exc.__cause__
-            last_exc.__cause__ = nexc
-
-        return exc
-
-    def _combine_multiple_normal_exceptions(
-        msg: str, excs: List[Exception]
-    ) -> Exception:
-        if not excs:
-            raise ValueError("no exceptions to combine")
-
-        if len(excs) == 1:
-            return excs[0]
-
-        exc = Exception(msg)
-        last_exc: Union[Exception, BaseException] = exc
-
-        for nexc in excs:
-            while last_exc.__cause__ is not None:
-                last_exc = last_exc.__cause__
-            last_exc.__cause__ = nexc
-
-        return exc
-
-else:
-
-    def _combine_multiple_base_exceptions(
-        msg: str, excs: List[BaseException]
-    ) -> BaseException:
-        if not excs:
-            raise ValueError("no exceptions to combine")
-
-        if len(excs) == 1:
-            return excs[0]
-
-        return BaseExceptionGroup(msg, excs)
-
-    def _combine_multiple_normal_exceptions(
-        msg: str, excs: List[Exception]
-    ) -> Exception:
-        if not excs:
-            raise ValueError("no exceptions to combine")
-
-        if len(excs) == 1:
-            return excs[0]
-
-        return ExceptionGroup(msg, excs)
-
-
-def _combine_multiple_exceptions(msg: str, excs: List[BaseException]) -> BaseException:
-    if all(isinstance(e, Exception) for e in excs):
-        return _combine_multiple_normal_exceptions(msg, cast(List[Exception], excs))
-    return _combine_multiple_base_exceptions(msg, excs)
