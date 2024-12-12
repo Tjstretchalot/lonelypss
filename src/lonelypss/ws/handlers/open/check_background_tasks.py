@@ -53,7 +53,7 @@ if sys.version_info < (3, 11):
         if len(excs) == 1:
             return excs[0]
 
-        exc = Exception(msg)
+        exc = BaseException(msg)
         last_exc = exc
 
         for nexc in excs:
