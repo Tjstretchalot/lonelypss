@@ -1,11 +1,43 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from lonelypss.ws.handlers.open.processors.process_unsubscribe_exact import (
+    process_unsubscribe_exact,
+)
+from lonelypss.ws.handlers.open.processors.process_subscribe_exact import (
+    process_subscribe_exact,
+)
+from lonelypss.ws.handlers.open.processors.process_subscribe_glob import (
+    process_subscribe_glob,
+)
+from lonelypss.ws.handlers.open.processors.process_unsubscribe_glob import (
+    process_unsubscribe_glob,
+)
 from lonelypss.ws.handlers.open.processors.protocol import S2B_MessageProcessor
 from lonelypss.ws.state import StateOpen
 from lonelypsp.stateful.message import S2B_Message
+from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
+
+
+PROCESSORS = {
+    SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT: process_subscribe_exact,
+    SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_GLOB: process_subscribe_glob,
+    SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_EXACT: process_unsubscribe_exact,
+    SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_GLOB: process_unsubscribe_glob,
+}
 
 
 async def process_any(state: StateOpen, message: S2B_Message) -> None:
-    raise NotImplementedError
+    """Processes a message from the subscriber to the broadcaster. This is
+    not async safe in the sense we only expect to be processing one message
+    at a time per websocket in order to give a predictable ack order, but
+    can handle the send task running in a separate coroutine, which may access
+    some similar resources
+
+    Raises an exception if the broadcaster should disconnect the subscriber and
+    cleanup resources
+    """
+    await cast(S2B_MessageProcessor[S2B_Message], PROCESSORS[message.type])(
+        state, message
+    )
 
 
 if TYPE_CHECKING:

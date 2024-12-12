@@ -5,6 +5,9 @@ from typing import List, Union, cast
 class NormalDisconnectException(Exception): ...
 
 
+class AuthRejectedException(Exception): ...
+
+
 if sys.version_info < (3, 11):
 
     def combine_multiple_base_exceptions(
