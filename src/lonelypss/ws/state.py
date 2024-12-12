@@ -179,6 +179,7 @@ class WaitingInternalMessageType(Enum):
     """
 
 
+@dataclass
 class WaitingInternalSpooledLargeMessage:
     """A message from the receiver that may be too large to hold in memory, after
     we've copied it to a new location and released the original stream.
@@ -274,6 +275,24 @@ class CompressorTrainingDataCollector:
     tmpfile: SyncIOBaseLikeIO
     """a readable, writable, seekable, tellable, closable file-like object where we are storing 
     the data to train the dictionary. closing this file will delete the data
+
+    typically, if writing a small message, the flow is:
+    - seek to the end (`seek(0, os.SEEK_END)`)
+    - write the length prefix (`length.to_bytes(4, "big")`)
+    - write the data
+    - yield to the event loop
+
+    for writing a large message, the flow is:
+    - seek to the end (`seek(0, os.SEEK_END)`)
+    - write the length prefix (`length.to_bytes(4, "big")`)
+    - remember the current position (`pos = tell()`)
+    - write zeros for the data
+    - yield to the event loop
+    - when you receive more data:
+      - seek to the position (`seek(pos, os.SEEK_SET)`)
+      - write the data
+      - remember the new position (`pos += len(data)`)
+      - repeat until all data is written
     """
 
 
