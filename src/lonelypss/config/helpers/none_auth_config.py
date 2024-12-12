@@ -1,4 +1,4 @@
-from typing import Literal, Optional, TYPE_CHECKING, Type
+from typing import TYPE_CHECKING, Literal, Optional, Type
 
 if TYPE_CHECKING:
     from lonelypss.config.auth_config import (

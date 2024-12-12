@@ -1,13 +1,25 @@
 import asyncio
-from collections import deque
+import base64
 import hashlib
 import io
 import secrets
 import tempfile
+from collections import deque
 from typing import TYPE_CHECKING, List, cast
 
 import aiohttp
 import zstandard
+from lonelypsp.stateful.constants import (
+    BroadcasterToSubscriberStatefulMessageType,
+    SubscriberToBroadcasterStatefulMessageType,
+)
+from lonelypsp.stateful.messages.configure import S2B_ConfigureParser
+from lonelypsp.stateful.messages.confirm_configure import (
+    B2S_ConfirmConfigure,
+    serialize_b2s_confirm_configure,
+)
+from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
+
 from lonelypss.util.websocket_message import WSMessageBytes
 from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.simple_receiver import SimpleReceiver
@@ -23,21 +35,10 @@ from lonelypss.ws.state import (
     State,
     StateClosing,
     StateOpen,
-    StateWaitingConfigure,
     StateType,
+    StateWaitingConfigure,
 )
 from lonelypss.ws.util import make_websocket_read_task
-from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
-from lonelypsp.stateful.messages.configure import S2B_ConfigureParser
-from lonelypsp.stateful.constants import (
-    SubscriberToBroadcasterStatefulMessageType,
-    BroadcasterToSubscriberStatefulMessageType,
-)
-from lonelypsp.stateful.messages.confirm_configure import (
-    B2S_ConfirmConfigure,
-    serialize_b2s_confirm_configure,
-)
-import base64
 
 
 async def _make_standard_compressor(state: StateWaitingConfigure) -> CompressorReady:

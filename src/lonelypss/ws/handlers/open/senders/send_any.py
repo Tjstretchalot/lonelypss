@@ -1,10 +1,11 @@
 from typing import Union
+
 from lonelypss.ws.state import (
-    StateOpen,
-    InternalSmallMessage,
     InternalLargeMessage,
-    WaitingInternalSpooledLargeMessage,
+    InternalSmallMessage,
     SimplePendingSendPreFormatted,
+    StateOpen,
+    WaitingInternalSpooledLargeMessage,
 )
 
 

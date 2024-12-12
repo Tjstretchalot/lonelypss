@@ -1,21 +1,22 @@
 from typing import TYPE_CHECKING, cast
-from lonelypss.ws.handlers.open.processors.process_unsubscribe_exact import (
-    process_unsubscribe_exact,
-)
+
+from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
+from lonelypsp.stateful.message import S2B_Message
+
 from lonelypss.ws.handlers.open.processors.process_subscribe_exact import (
     process_subscribe_exact,
 )
 from lonelypss.ws.handlers.open.processors.process_subscribe_glob import (
     process_subscribe_glob,
 )
+from lonelypss.ws.handlers.open.processors.process_unsubscribe_exact import (
+    process_unsubscribe_exact,
+)
 from lonelypss.ws.handlers.open.processors.process_unsubscribe_glob import (
     process_unsubscribe_glob,
 )
 from lonelypss.ws.handlers.open.processors.protocol import S2B_MessageProcessor
 from lonelypss.ws.state import StateOpen
-from lonelypsp.stateful.message import S2B_Message
-from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
-
 
 PROCESSORS = {
     SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT: process_subscribe_exact,

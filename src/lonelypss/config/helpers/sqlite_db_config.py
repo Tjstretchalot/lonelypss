@@ -1,5 +1,6 @@
 import sqlite3
 from typing import TYPE_CHECKING, AsyncIterable, Literal, Optional, Type
+
 from lonelypss.config.config import (
     SubscriberInfo,
     SubscriberInfoExact,

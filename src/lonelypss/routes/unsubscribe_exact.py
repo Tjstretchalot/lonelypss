@@ -1,11 +1,11 @@
 import time
 from typing import Annotated, Optional
+
 from fastapi import APIRouter, Header, Request, Response
 
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.util.async_io import async_read_exact
 from lonelypss.util.request_body_io import AsyncIterableAIO
-
 
 router = APIRouter()
 

@@ -1,7 +1,8 @@
 import asyncio
 from typing import TYPE_CHECKING
+
 from lonelypss.ws.handlers.protocol import StateHandler
-from lonelypss.ws.state import State, StateClosing, StateWaitingConfigure, StateType
+from lonelypss.ws.state import State, StateClosing, StateType, StateWaitingConfigure
 from lonelypss.ws.util import make_websocket_read_task
 
 

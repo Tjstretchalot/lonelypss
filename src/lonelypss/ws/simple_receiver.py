@@ -1,13 +1,14 @@
 import asyncio
 import re
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type, Union
+
+from lonelypss.util.sync_io import SyncReadableBytesIO
 from lonelypss.ws.state import (
     AsyncioWSReceiver,
     InternalLargeMessage,
-    InternalSmallMessage,
     InternalMessageType,
+    InternalSmallMessage,
 )
-from lonelypss.util.sync_io import SyncReadableBytesIO
 
 
 class SimpleReceiver:

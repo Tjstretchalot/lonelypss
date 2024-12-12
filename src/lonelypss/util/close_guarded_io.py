@@ -1,8 +1,8 @@
 import io
-from typing import Any, Union
 import sys
-from lonelypss.util.sync_io import SyncIOBaseLikeIO
+from typing import Any, Union
 
+from lonelypss.util.sync_io import SyncIOBaseLikeIO
 
 if sys.version_info <= (3, 10):
     from tempfile import SpooledTemporaryFile

@@ -1,4 +1,5 @@
 from typing import Protocol
+
 from lonelypss.ws.state import State
 
 

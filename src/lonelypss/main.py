@@ -1,7 +1,7 @@
-from argparse import ArgumentParser
 import json
 import os
 import secrets
+from argparse import ArgumentParser
 from typing import Literal, Optional, Set
 
 

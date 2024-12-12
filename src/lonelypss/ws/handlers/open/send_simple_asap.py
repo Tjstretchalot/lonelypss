@@ -1,4 +1,5 @@
 import asyncio
+
 from lonelypss.ws.state import (
     SimplePendingSendPreFormatted,
     SimplePendingSendType,

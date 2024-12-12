@@ -1,6 +1,7 @@
 import asyncio
 from collections import deque
 from typing import TYPE_CHECKING, Iterable, List, Optional, SupportsIndex, Union, cast
+
 from lonelypss.ws.handlers.open.check_background_tasks import check_background_tasks
 from lonelypss.ws.handlers.open.check_compressors import check_compressors
 from lonelypss.ws.handlers.open.check_internal_message_task import (
@@ -15,6 +16,7 @@ from lonelypss.ws.handlers.open.errors import (
     combine_multiple_exceptions,
 )
 from lonelypss.ws.handlers.open.processors.processor import process_any
+from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.state import (
     CompressorState,
     CompressorTrainingInfoType,
@@ -23,10 +25,9 @@ from lonelypss.ws.state import (
     StateClosing,
     StateOpen,
     StateType,
-    WaitingInternalMessageType,
     WaitingInternalMessage,
+    WaitingInternalMessageType,
 )
-from lonelypss.ws.handlers.protocol import StateHandler
 
 
 async def handle_open(state: State) -> State:

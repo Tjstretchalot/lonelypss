@@ -1,5 +1,5 @@
 from fastapi.requests import HTTPConnection
-from starlette.types import ASGIApp, Scope, Receive, Send
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from lonelypss.util.ws_receiver import FanoutWSReceiver
 

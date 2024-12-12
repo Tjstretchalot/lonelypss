@@ -2,7 +2,6 @@ from typing import Generic, Protocol, TypeVar
 
 from lonelypss.ws.state import StateOpen
 
-
 T_contra = TypeVar("T_contra", contravariant=True)
 
 

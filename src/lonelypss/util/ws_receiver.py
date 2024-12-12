@@ -1,4 +1,5 @@
 from typing import Protocol
+
 from lonelypss.util.sync_io import SyncReadableBytesIO
 
 

@@ -1,5 +1,13 @@
 import time
 from typing import TYPE_CHECKING
+
+from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
+from lonelypsp.stateful.messages.confirm_unsubscribe import (
+    B2S_ConfirmUnsubscribeExact,
+    serialize_b2s_confirm_unsubscribe_exact,
+)
+from lonelypsp.stateful.messages.unsubscribe import S2B_UnsubscribeExact
+
 from lonelypss.ws.handlers.open.errors import AuthRejectedException
 from lonelypss.ws.handlers.open.processors.protocol import S2B_MessageProcessor
 from lonelypss.ws.handlers.open.send_simple_asap import send_simple_asap
@@ -7,12 +15,6 @@ from lonelypss.ws.handlers.open.websocket_url import (
     make_for_receive_websocket_url_and_change_counter,
 )
 from lonelypss.ws.state import StateOpen
-from lonelypsp.stateful.messages.unsubscribe import S2B_UnsubscribeExact
-from lonelypsp.stateful.messages.confirm_unsubscribe import (
-    B2S_ConfirmUnsubscribeExact,
-    serialize_b2s_confirm_unsubscribe_exact,
-)
-from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
 
 
 async def process_unsubscribe_exact(

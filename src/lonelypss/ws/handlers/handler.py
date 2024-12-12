@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING, Dict
+
 from lonelypss.ws.handlers.accepting import handle_accepting
 from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.state import State, StateType

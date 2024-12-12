@@ -1,6 +1,11 @@
 import asyncio
 import io
 from typing import cast
+
+from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
+from lonelypsp.stateful.parser import S2B_AnyMessageParser
+from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
+
 from lonelypss.util.websocket_message import WSMessageBytes
 from lonelypss.ws.handlers.open.check_result import CheckResult
 from lonelypss.ws.handlers.open.errors import NormalDisconnectException
@@ -8,10 +13,6 @@ from lonelypss.ws.handlers.open.processors.processor import process_any
 from lonelypss.ws.state import (
     StateOpen,
 )
-from lonelypsp.stateful.parser import S2B_AnyMessageParser
-from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
-from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
-
 from lonelypss.ws.util import make_websocket_read_task
 
 

@@ -2,11 +2,12 @@ import asyncio
 import io
 import tempfile
 from typing import Union
+
 from lonelypss.ws.handlers.open.check_result import CheckResult
 from lonelypss.ws.handlers.open.senders.send_any import send_any
 from lonelypss.ws.state import (
-    InternalMessageType,
     InternalLargeMessage,
+    InternalMessageType,
     InternalSmallMessage,
     StateOpen,
     WaitingInternalMessageType,

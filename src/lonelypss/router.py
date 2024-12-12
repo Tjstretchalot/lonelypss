@@ -1,9 +1,10 @@
 from fastapi import APIRouter
+
+import lonelypss.routes.notify
 import lonelypss.routes.subscribe_exact
 import lonelypss.routes.subscribe_glob
 import lonelypss.routes.unsubscribe_exact
 import lonelypss.routes.unsubscribe_glob
-import lonelypss.routes.notify
 import lonelypss.routes.websocket_endpoint
 
 router = APIRouter()
