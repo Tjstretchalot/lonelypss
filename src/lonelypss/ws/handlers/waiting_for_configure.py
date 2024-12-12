@@ -8,7 +8,6 @@ from collections import deque
 from typing import TYPE_CHECKING, List, cast
 
 import aiohttp
-import zstandard
 from lonelypsp.stateful.constants import (
     BroadcasterToSubscriberStatefulMessageType,
     SubscriberToBroadcasterStatefulMessageType,
@@ -39,6 +38,11 @@ from lonelypss.ws.state import (
     StateWaitingConfigure,
 )
 from lonelypss.ws.util import make_websocket_read_task
+
+try:
+    import zstandard
+except ImportError:
+    ...
 
 
 async def _make_standard_compressor(state: StateWaitingConfigure) -> CompressorReady:
@@ -75,7 +79,7 @@ async def _make_preset_compressor(
         type=CompressorState.READY,
         identifier=compressor_id,
         level=level,
-        min_size=0,
+        min_size=state.broadcaster_config.compression_min_size,
         max_size=None,
         data=zdict,
         compressor=zstandard.ZstdCompressor(
