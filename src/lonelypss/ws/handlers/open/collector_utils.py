@@ -343,7 +343,7 @@ class CompressorLargeMessageWriter(Protocol):
         """calls raise_if_not_done"""
 
 
-class _VoidingCompressorLargeMessageWriter:
+class VoidingCompressorLargeMessageWriter:
     def __init__(self, length: int) -> None:
         self.length = length
         self.remaining = length
@@ -374,7 +374,7 @@ class _VoidingCompressorLargeMessageWriter:
 
 
 if TYPE_CHECKING:
-    _: Type[CompressorLargeMessageWriter] = _VoidingCompressorLargeMessageWriter
+    _: Type[CompressorLargeMessageWriter] = VoidingCompressorLargeMessageWriter
 
 
 class _RealCompressorLargeMessageWriter:
@@ -447,7 +447,7 @@ if TYPE_CHECKING:
 
 
 def maybe_write_large_message_for_training(
-    state: StateOpen, length: int
+    state: StateOpen, length: int, never_store: bool = False
 ) -> CompressorLargeMessageWriter:
     """If we need to collect a message of the given length in the training
     collector, returns an object that will write a large message to the
@@ -458,16 +458,18 @@ def maybe_write_large_message_for_training(
     thread, even while training is occuring (on the main asyncio thread), and it
     may be weaved with small messages being written to the collector (again, on
     the main asyncio thread)
+
+    If `never_store` is set this will always return a void writer, which can be
+    convenient when using this as a context manager
     """
 
-    if state.compressor_training_info is None:
-        return _VoidingCompressorLargeMessageWriter(length)
-
-    if length < state.broadcaster_config.compression_min_size:
-        return _VoidingCompressorLargeMessageWriter(length)
-
-    if length >= state.broadcaster_config.compression_trained_max_size:
-        return _VoidingCompressorLargeMessageWriter(length)
+    if (
+        never_store
+        or state.compressor_training_info is None
+        or length < state.broadcaster_config.compression_min_size
+        or length >= state.broadcaster_config.compression_trained_max_size
+    ):
+        return VoidingCompressorLargeMessageWriter(length)
 
     if (
         state.compressor_training_info.type
@@ -478,7 +480,7 @@ def maybe_write_large_message_for_training(
             state.compressor_training_info.type
             == CompressorTrainingInfoType.WAITING_TO_REFRESH
         ):
-            return _VoidingCompressorLargeMessageWriter(length)
+            return VoidingCompressorLargeMessageWriter(length)
 
     return _RealCompressorLargeMessageWriter(
         state.compressor_training_info.collector, length

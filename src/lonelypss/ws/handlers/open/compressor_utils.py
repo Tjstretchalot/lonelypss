@@ -1,7 +1,7 @@
 from types import TracebackType
 from typing import Optional, Type
 
-from lonelypss.ws.state import CompressorReady, StateOpen
+from lonelypss.ws.state import CompressorReady, CompressorState, StateOpen
 
 try:
     import zstandard
@@ -16,6 +16,9 @@ class CompressorReservation:
     Acts as a synchronous context manager; must be entered to use the
     compressor and exited to either dispose of the compressor or return it
     to the pool based on the current pool size
+
+    Doesn't return the compressor object to the pool if an exception is passed
+    to exit, in case the compressor is in an invalid state
     """
 
     def __init__(self, compressor: CompressorReady, *, max_compressors: int) -> None:
@@ -50,7 +53,7 @@ class CompressorReservation:
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
-        if self._compressor is None:
+        if self._compressor is None or exc_type is not None:
             return
 
         if len(self.compressor_configuration.compressors) < self.max_compressors:
@@ -62,6 +65,9 @@ class CompressorReservation:
 class DecompressorReservation:
     """A convenience object for generating or reserving an actual object
     capable of decompressing data from a ready compressor configuration
+
+    Doesn't return the decompressor object to the pool if an exception is passed
+    to exit, in case the decompressor is in an invalid state
     """
 
     def __init__(
@@ -102,7 +108,7 @@ class DecompressorReservation:
         exc_value: Optional[BaseException],
         traceback: Optional[TracebackType],
     ) -> None:
-        if self._decompressor is None:
+        if self._decompressor is None or exc_type is not None:
             return
 
         if len(self.compressor_configuration.decompressors) < self.max_decompressors:
@@ -131,3 +137,25 @@ def reserve_decompressor(
         max_window_size=state.broadcaster_config.decompression_max_window_size,
         max_decompressors=5,
     )
+
+
+def choose_compressor_for_compression(
+    state: StateOpen, length: int
+) -> Optional[CompressorReady]:
+    """Determines which compressor, if any, should be used for compressing
+    a message of the given length
+    """
+    for candidate_idx in range(len(state.compressors) - 1, -1, -1):
+        candidate_compressor = state.compressors[candidate_idx]
+        if candidate_compressor.type == CompressorState.PREPARING:
+            if candidate_compressor.task.done():
+                candidate_compressor = candidate_compressor.task.result()
+            else:
+                continue
+
+        if candidate_compressor.min_size <= length and (
+            candidate_compressor.max_size is None
+            or length < candidate_compressor.max_size
+        ):
+            return candidate_compressor
+    return None

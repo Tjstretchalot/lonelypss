@@ -1,22 +1,47 @@
-from typing import Union
+from typing import TYPE_CHECKING, Any, Dict, Union, cast
 
+from lonelypss.ws.handlers.open.senders.protocol import Sender
+from lonelypss.ws.handlers.open.senders.send_internal_large_message import (
+    send_internal_large_message,
+)
+from lonelypss.ws.handlers.open.senders.send_internal_small_message import (
+    send_internal_small_message,
+)
+from lonelypss.ws.handlers.open.senders.send_simple_pending_send_pre_formatted import (
+    send_simple_pending_send_pre_formatted,
+)
+from lonelypss.ws.handlers.open.senders.send_waiting_internal_spooled_large_message import (
+    send_waiting_internal_spooled_large_message,
+)
 from lonelypss.ws.state import (
     InternalLargeMessage,
+    InternalMessageType,
     InternalSmallMessage,
     SimplePendingSendPreFormatted,
+    SimplePendingSendType,
     StateOpen,
+    WaitingInternalMessageType,
     WaitingInternalSpooledLargeMessage,
 )
+
+Sendable = Union[
+    InternalSmallMessage,
+    InternalLargeMessage,
+    WaitingInternalSpooledLargeMessage,
+    SimplePendingSendPreFormatted,
+]
+
+SENDERS: Dict[Any, Any] = {
+    InternalMessageType.SMALL: send_internal_small_message,
+    InternalMessageType.LARGE: send_internal_large_message,
+    WaitingInternalMessageType.SPOOLED_LARGE: send_waiting_internal_spooled_large_message,
+    SimplePendingSendType.PRE_FORMATTED: send_simple_pending_send_pre_formatted,
+}
 
 
 async def send_any(
     state: StateOpen,
-    sendable: Union[
-        InternalSmallMessage,
-        InternalLargeMessage,
-        WaitingInternalSpooledLargeMessage,
-        SimplePendingSendPreFormatted,
-    ],
+    message: Sendable,
 ) -> None:
     """The target for `send_task` on StateOpen. This will write to the websocket and
     expect that nothing else is doing so.
@@ -26,4 +51,8 @@ async def send_any(
     will spool the message if it detects its taking too long to push the message
     to the ASGI server.
     """
-    raise NotImplementedError
+    await cast(Sender[Sendable], SENDERS[message.type])(state, message)
+
+
+if TYPE_CHECKING:
+    _: Sender[Sendable] = send_any
