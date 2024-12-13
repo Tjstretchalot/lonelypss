@@ -1,7 +1,8 @@
 import asyncio
 import io
 import tempfile
-from typing import TYPE_CHECKING, Optional
+from types import TracebackType
+from typing import TYPE_CHECKING, Optional, Type
 
 from lonelypss.util.sync_io import SyncIOBaseLikeIO, SyncReadableBytesIO
 from lonelypss.ws.handlers.open.send_receive_stream import send_receive_stream
@@ -44,35 +45,39 @@ async def send_internal_large_message(
             return
 
         read_lock = asyncio.Lock()
-        stream = _SwappableSyncReadableBytesIO(message.stream, message.length)
-        timeout = asyncio.create_task(
-            asyncio.sleep(state.broadcaster_config.websocket_large_direct_send_timeout)
-        )
-        send_task = asyncio.create_task(
-            send_receive_stream(
-                state,
-                stream,
-                topic=message.topic,
-                uncompressed_sha512=message.sha512,
-                uncompressed_length=message.length,
-                maybe_store_for_training=True,
-                read_lock=read_lock,
-            )
-        )
-
-        await asyncio.wait([timeout, send_task], return_when=asyncio.FIRST_COMPLETED)
-
-        timeout.cancel()
-        if not send_task.done():
-            async with read_lock:
-                await stream.swap(
-                    spool_size=state.broadcaster_config.message_body_spool_size
+        with _SwappableSyncReadableBytesIO(message.stream, message.length) as stream:
+            timeout = asyncio.create_task(
+                asyncio.sleep(
+                    state.broadcaster_config.websocket_large_direct_send_timeout
                 )
-            message.finished.set()
-            await send_task
-        else:
-            message.finished.set()
-            send_task.result()
+            )
+            send_task = asyncio.create_task(
+                send_receive_stream(
+                    state,
+                    stream,
+                    topic=message.topic,
+                    uncompressed_sha512=message.sha512,
+                    uncompressed_length=message.length,
+                    maybe_store_for_training=True,
+                    read_lock=read_lock,
+                )
+            )
+
+            await asyncio.wait(
+                [timeout, send_task], return_when=asyncio.FIRST_COMPLETED
+            )
+
+            timeout.cancel()
+            if not send_task.done():
+                async with read_lock:
+                    await stream.swap(
+                        spool_size=state.broadcaster_config.message_body_spool_size
+                    )
+                message.finished.set()
+                await send_task
+            else:
+                message.finished.set()
+                send_task.result()
     except BaseException:
         message.finished.set()
         raise
@@ -85,6 +90,17 @@ class _SwappableSyncReadableBytesIO:
         self._original_stream: Optional[SyncReadableBytesIO] = original_stream
         self._original_remaining: Optional[int] = original_length
         self._swapped_stream: Optional[SyncIOBaseLikeIO] = None
+
+    def __enter__(self) -> "_SwappableSyncReadableBytesIO":
+        return self
+
+    def __exit__(
+        self,
+        exc_type: Optional[Type[BaseException]],
+        exc_value: Optional[BaseException],
+        traceback: Optional[TracebackType],
+    ) -> None:
+        self.close()
 
     async def swap(self, spool_size: int) -> None:
         if self._original_stream is None:
