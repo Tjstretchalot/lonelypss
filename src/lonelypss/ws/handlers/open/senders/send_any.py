@@ -21,7 +21,7 @@ async def send_any(
     """The target for `send_task` on StateOpen. This will write to the websocket and
     expect that nothing else is doing so.
 
-    When sending an internal large message that is unspooled, it will handle
+    When sending an internal large message that is unspooled, this will handle
     setting the finished event as quickly as possible; to facilitate this, it
     will spool the message if it detects its taking too long to push the message
     to the ASGI server.

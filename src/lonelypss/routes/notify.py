@@ -6,7 +6,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Annotated, Dict, Optional
+from typing import Annotated, Dict, Literal, Optional, Union
 
 import aiohttp
 from fastapi import APIRouter, Header, Request, Response
@@ -176,13 +176,26 @@ class TrustedNotifyResultType(Enum):
 
 
 @dataclass
-class TrustedNotifyResult:
-    type: TrustedNotifyResultType
-    """If we attempted all subscribers"""
+class TrustedNotifyResultOK:
+    type: Literal[TrustedNotifyResultType.OK]
+    """discriminator type"""
     succeeded: int
     """The number of subscribers we reached"""
     failed: int
     """The number of subscribers we could not reach"""
+
+
+@dataclass
+class TrustedNotifyResultUnavailable:
+    type: Literal[TrustedNotifyResultType.UNAVAILABLE]
+    """discriminator type"""
+    partial_succeeded: int
+    """The number of subscribers we reached"""
+    partial_failed: int
+    """The number of subscribers we could not reach"""
+
+
+TrustedNotifyResult = Union[TrustedNotifyResultOK, TrustedNotifyResultUnavailable]
 
 
 async def handle_trusted_notify(
@@ -222,10 +235,10 @@ async def handle_trusted_notify(
 
     async for subscriber in config.get_subscribers(topic=topic):
         if subscriber["type"] == "unavailable":
-            return TrustedNotifyResult(
+            return TrustedNotifyResultUnavailable(
                 type=TrustedNotifyResultType.UNAVAILABLE,
-                succeeded=succeeded,
-                failed=attempted - succeeded,
+                partial_succeeded=succeeded,
+                partial_failed=attempted - succeeded,
             )
 
         attempted += 1
@@ -276,7 +289,7 @@ async def handle_trusted_notify(
         except aiohttp.ClientError:
             logging.error(f"Failed to notify {url} about {topic!r}", exc_info=True)
 
-    return TrustedNotifyResult(
+    return TrustedNotifyResultOK(
         type=TrustedNotifyResultType.OK,
         succeeded=succeeded,
         failed=attempted - succeeded,

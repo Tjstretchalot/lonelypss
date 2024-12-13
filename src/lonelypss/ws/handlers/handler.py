@@ -1,11 +1,15 @@
 from typing import TYPE_CHECKING, Dict
 
 from lonelypss.ws.handlers.accepting import handle_accepting
+from lonelypss.ws.handlers.open.handler import handle_open
 from lonelypss.ws.handlers.protocol import StateHandler
+from lonelypss.ws.handlers.waiting_configure import handle_waiting_configure
 from lonelypss.ws.state import State, StateType
 
 _handlers: Dict[StateType, StateHandler] = {
     StateType.ACCEPTING: handle_accepting,
+    StateType.WAITING_CONFIGURE: handle_waiting_configure,
+    StateType.OPEN: handle_open,
 }
 
 

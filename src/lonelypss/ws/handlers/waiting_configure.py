@@ -39,11 +39,6 @@ from lonelypss.ws.state import (
 )
 from lonelypss.ws.util import make_websocket_read_task
 
-try:
-    import zstandard
-except ImportError:
-    ...
-
 
 async def _make_standard_compressor(state: StateWaitingConfigure) -> CompressorReady:
     return CompressorReady(
@@ -53,15 +48,8 @@ async def _make_standard_compressor(state: StateWaitingConfigure) -> CompressorR
         min_size=state.broadcaster_config.compression_trained_max_size,
         max_size=None,
         data=None,
-        compressor=zstandard.ZstdCompressor(
-            level=3,
-            write_checksum=False,
-            write_content_size=False,
-            write_dict_id=False,
-        ),
-        decompressor=zstandard.ZstdDecompressor(
-            max_window_size=state.broadcaster_config.decompression_max_window_size
-        ),
+        compressors=list(),
+        decompressors=list(),
     )
 
 
@@ -82,21 +70,12 @@ async def _make_preset_compressor(
         min_size=state.broadcaster_config.compression_min_size,
         max_size=None,
         data=zdict,
-        compressor=zstandard.ZstdCompressor(
-            level=level,
-            dict_data=zdict,
-            write_checksum=False,
-            write_content_size=False,
-            write_dict_id=False,
-        ),
-        decompressor=zstandard.ZstdDecompressor(
-            dict_data=zdict,
-            max_window_size=state.broadcaster_config.decompression_max_window_size,
-        ),
+        compressors=list(),
+        decompressors=list(),
     )
 
 
-async def handle_waiting_for_configure(state: State) -> State:
+async def handle_waiting_configure(state: State) -> State:
     """Waits for a configure message to be sent over the websocket; if the subscriber
     sends anything else, moves to closing.
     """
@@ -172,6 +151,7 @@ async def handle_waiting_for_configure(state: State) -> State:
                             messages=0,
                             length=0,
                             tmpfile=tempfile.TemporaryFile(mode="w+b", buffering=-1),
+                            pending=set(),
                         ),
                     )
                 )
@@ -210,4 +190,4 @@ async def handle_waiting_for_configure(state: State) -> State:
 
 
 if TYPE_CHECKING:
-    _: StateHandler = handle_waiting_for_configure
+    _: StateHandler = handle_waiting_configure

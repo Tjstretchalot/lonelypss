@@ -140,7 +140,12 @@ class DBConfig(Protocol):
 class GenericConfig(Protocol):
     @property
     def message_body_spool_size(self) -> int:
-        """If the message body exceeds this size we always switch to a temporary file."""
+        """If the message body exceeds this size we always switch to a temporary file.
+
+        In general, unless there is another specific configuration option for it, this
+        is the maximum size of any single arbitrary length item (e.g., the decompressed
+        body of a compressed message) that is held in memory before spooling to file.
+        """
 
     @property
     def outgoing_http_timeout_total(self) -> Optional[float]:

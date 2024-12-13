@@ -276,6 +276,8 @@ class CompressorTrainingDataCollector:
     """a readable, writable, seekable, tellable, closable file-like object where we are storing 
     the data to train the dictionary. closing this file will delete the data
 
+    see collector_utils for a more convenient interface
+
     typically, if writing a small message, the flow is:
     - seek to the end (`seek(0, os.SEEK_END)`)
     - write the length prefix (`length.to_bytes(4, "big")`)
@@ -283,6 +285,8 @@ class CompressorTrainingDataCollector:
     - yield to the event loop
 
     for writing a large message, the flow is:
+    - store a reference to the collector as the states collector may change
+    - create an asyncio.Event, add it to the 'pending' set
     - seek to the end (`seek(0, os.SEEK_END)`)
     - write the length prefix (`length.to_bytes(4, "big")`)
     - remember the current position (`pos = tell()`)
@@ -293,6 +297,14 @@ class CompressorTrainingDataCollector:
       - write the data
       - remember the new position (`pos += len(data)`)
       - repeat until all data is written
+    - mark the event finished
+    - remove the event from the pending set
+    """
+
+    pending: Set[asyncio.Event]
+    """while this set is non-empty the data in the tmpfile may be in a partial
+    state; when this is empty, the data in the tmpfile is complete and can be
+    used to train a dictionary
     """
 
 
@@ -406,11 +418,15 @@ class CompressorReady:
     data: "Optional[zstandard.ZstdCompressionDict]"
     """if there is a custom compression dictionary, that dictionary, otherwise None"""
 
-    compressor: "zstandard.ZstdCompressor"
-    """the zstandard compressor object"""
+    compressors: "List[zstandard.ZstdCompressor]"
+    """the zstandard compressor objects that are not in use. WARN: compressors
+    are not asyncio-safe
+    """
 
-    decompressor: "zstandard.ZstdDecompressor"
-    """the zstandard decompressor object"""
+    decompressors: "List[zstandard.ZstdDecompressor]"
+    """the zstandard decompressors that are not in use. WARN: decompressors
+    are not asyncio-safe
+    """
 
 
 @dataclass
