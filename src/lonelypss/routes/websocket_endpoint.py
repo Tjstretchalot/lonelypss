@@ -272,19 +272,28 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
         headers:
             x-identifier: the id we are assigning to this dictionary, unsigned, big-endian, max 8 bytes,
-                min 65536. if not unique, overwrite the previous dictionary
+                min 65536. if not unique, disconnect
             x-compression-level: what compression level we think is best when using
                 this dictionary. signed, big-endian, max 2 bytes, max 22. the subscriber
                 is free to choose a different compression level
-            x-min-size: inclusive, max 4 bytes, big-endian, unsigned. a hint to the client for the smallest
-                payload for which we think this dictionary is useful. the client can use this
+            x-min-size: inclusive, max 4 bytes, big-endian, unsigned. a hint to the subscriber for the smallest
+                payload for which we think this dictionary is useful. the subscriber can use this
                 dictionary on smaller messages if it wants
-            x-max-size: exclusive, max 8 bytes, big-endian, unsigned. a hint to the client for the largest
-                payload for which we think this dictionary is useful. uses 2**64-1 to indicate
-                no upper bound. the client can use this dictionary on larger messages if it wants
+            x-max-size: exclusive, max 8 bytes, big-endian, unsigned. a hint to the subscriber for the largest
+                payload for which the broadcaster will compress with this dictionary. uses 2**64-1 to indicate
+                no upper bound. the subscriber can use this dictionary on larger messages if it wants
 
-        body: the dictionary, max 15MB, typically ~16kb. may be length 0 to
-            indicate we no longer want to use this dictionary
+        body: the dictionary, typically 16-64kb
+
+    11. Disable zstandard compression with a specific custom dictionary
+        configures the subscriber to stop using a dictionary the broadcaster previously trained
+        and transmitted, and indicates the broadcaster will not use it in the future
+        (i.e., the subscriber can clear it from memory)
+
+        headers:
+            x-identifier: the id of the dictionary to stop using
+
+        body: none
     """
     config = get_config_from_request(websocket)
     receiver = get_ws_receiver_from_request(websocket)
