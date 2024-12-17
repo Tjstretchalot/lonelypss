@@ -6,6 +6,7 @@ from types import TracebackType
 from typing import TYPE_CHECKING, List, Optional, Protocol, Tuple, Type
 
 from lonelypss.util.sync_io import read_exact
+from lonelypss.ws.handlers.open.send_simple_asap import send_simple_asap
 from lonelypss.ws.state import (
     Compressor,
     CompressorPreparing,
@@ -17,6 +18,11 @@ from lonelypss.ws.state import (
     CompressorTrainingInfoWaitingToRefresh,
     StateOpen,
 )
+from lonelypsp.stateful.messages.disable_zstd_custom import (
+    B2S_DisableZstdCustom,
+    serialize_b2s_disable_zstd_custom,
+)
+from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
 
 try:
     import zstandard
@@ -159,6 +165,17 @@ def rotate_in_compressor(state: StateOpen, compressor: Compressor) -> None:
         state.compressors.pop(candidate_idx)
         if candidate.type == CompressorState.PREPARING:
             candidate.task.cancel()
+
+        send_simple_asap(
+            state,
+            serialize_b2s_disable_zstd_custom(
+                B2S_DisableZstdCustom(
+                    type=BroadcasterToSubscriberStatefulMessageType.ENABLE_ZSTD_CUSTOM,
+                    identifier=candidate.identifier,
+                ),
+                minimal_headers=state.broadcaster_config.websocket_minimal_headers,
+            ),
+        )
         break
 
     state.compressors.append(compressor)

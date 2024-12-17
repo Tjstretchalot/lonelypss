@@ -385,7 +385,9 @@ class CompressorState(Enum):
     """We are in the process of preparing the compressor for use"""
 
     READY = auto()
-    """The compressor is ready to use right now; it is not async or thread safe"""
+    """The compressor is ready to use right now; the individual zstandard compressors/
+    decompressors are not async or thread safe, but the pool of them is async safe
+    """
 
 
 @dataclass
@@ -419,13 +421,17 @@ class CompressorReady:
     """if there is a custom compression dictionary, that dictionary, otherwise None"""
 
     compressors: "List[zstandard.ZstdCompressor]"
-    """the zstandard compressor objects that are not in use. WARN: compressors
-    are not asyncio-safe
+    """the zstandard compressor objects that are not in use. pulled LIFO as it is
+    preferable to reuse the same object as much as possible.
+    
+    WARN: individual compressors are not asyncio safe
     """
 
     decompressors: "List[zstandard.ZstdDecompressor]"
-    """the zstandard decompressors that are not in use. WARN: decompressors
-    are not asyncio-safe
+    """the zstandard decompressors that are not in use. pulled LIFO as it is
+    preferable to reuse the same object as much as possible.
+    
+    WARN: decompressors are not asyncio-safe
     """
 
 
