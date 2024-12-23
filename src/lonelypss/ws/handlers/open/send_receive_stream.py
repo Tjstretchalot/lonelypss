@@ -19,7 +19,7 @@ from lonelypsp.stateful.messages.receive_stream import (
     serialize_b2s_receive_stream,
 )
 
-from lonelypss.util.sync_io import SyncReadableBytesIO
+from lonelypss.util.sync_io import SyncReadableBytesIO, read_exact
 from lonelypss.ws.handlers.open.collector_utils import (
     maybe_write_large_message_for_training,
 )
@@ -304,11 +304,15 @@ async def send_receive_stream_given_first_headers(
         state, length, never_store=not maybe_store_for_training
     ) as training_writer:
         while True:
-            if read_lock is None:
-                payload = stream.read(max(512, msg_size - len(headers)))
+            target_read_amount = min(length - pos, max(512, msg_size - len(headers)))
+
+            if target_read_amount == 0:
+                payload = b""
+            elif read_lock is None:
+                payload = read_exact(stream, target_read_amount)
             else:
                 async with read_lock:
-                    payload = stream.read(max(512, msg_size - len(headers)))
+                    payload = read_exact(stream, target_read_amount)
             training_writer.write_chunk(payload)
             pos += len(payload)
             is_done = pos >= length
