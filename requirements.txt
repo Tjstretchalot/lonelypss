@@ -10,7 +10,7 @@ colorama==0.4.6
 fastapi==0.115.5
 frozenlist==1.5.0
 idna==3.10
-lonelypsp==0.0.13
+lonelypsp==0.0.16
 multidict==6.1.0
 mypy==1.13.0
 mypy-extensions==1.0.0

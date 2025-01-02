@@ -204,26 +204,37 @@ def setup_locally(
         auth_secrets = json.load(f)
 """
     )
-    import_json = "\nimport json" if need_secrets else ""
+    import_json = "import json\n" if need_secrets else ""
+
+    import_config = "\n".join(
+        sorted(
+            [
+                f"import lonelypss.config.helpers.{db}_db_config as db_config",
+                f"import lonelypss.config.helpers.{incoming_auth}_auth_config as incoming_auth_config",
+                f"import lonelypss.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config",
+            ]
+        )
+    )
 
     with open("main.py", "w") as f:
         f.write(
-            f"""from contextlib import asynccontextmanager
+            f"""{import_json}from contextlib import asynccontextmanager
 from typing import AsyncIterator
+
+{import_config}
 from fastapi import FastAPI
-import lonelypss.config.helpers.{db}_db_config as db_config
-import lonelypss.config.helpers.{incoming_auth}_auth_config as incoming_auth_config
-import lonelypss.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config
-from lonelypss.middleware.config import ConfigMiddleware
-from lonelypss.config.lifespan import setup_config, teardown_config
 from lonelypss.config.auth_config import AuthConfigFromParts
 from lonelypss.config.config import (
+    CompressionConfigFromParts,
     Config,
     ConfigFromParts,
     GenericConfigFromValues,
-    CompressionConfigFromParts,
 )
-from lonelypss.router import router as HttpPubSubRouter{import_json}
+from lonelypss.config.lifespan import setup_config, teardown_config
+from lonelypss.middleware.config import ConfigMiddleware
+from lonelypss.middleware.ws_receiver import WSReceiverMiddleware
+from lonelypss.router import router as HttpPubSubRouter
+from lonelypss.util.ws_receiver import SimpleFanoutWSReceiver
 
 
 def _make_config() -> Config:{load_auth_secrets}
@@ -263,17 +274,22 @@ def _make_config() -> Config:{load_auth_secrets}
 
 
 config = _make_config()
+fanout = SimpleFanoutWSReceiver(receiver_url="http://127.0.0.1:3003", db=config)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await setup_config(config)
-    yield
-    await teardown_config(config)
+    try:
+        async with fanout:
+            yield
+    finally:
+        await teardown_config(config)
 
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(ConfigMiddleware, config=config)
+app.add_middleware(WSReceiverMiddleware, ws_receiver=fanout)
 app.include_router(HttpPubSubRouter)
 app.router.redirect_slashes = False
 """

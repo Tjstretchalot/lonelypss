@@ -27,7 +27,7 @@ from lonelypss.ws.handlers.open.send_simple_asap import send_simple_asap
 from lonelypss.ws.state import CompressorState, NotifyStreamState, StateOpen
 
 
-async def process_notify(state: StateOpen, message: S2B_NotifyStream) -> None:
+async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> None:
     """Processes a request by the subscriber to notify subscribers to a given
     topic with the given data, where that data may be sent over multiple websocket
     messages

@@ -3,8 +3,7 @@ from fastapi import APIRouter, WebSocket
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.middleware.ws_receiver import get_ws_receiver_from_request
 from lonelypss.ws.handlers.handler import handle_any
-from lonelypss.ws.state import StateAccepting, StateType
-
+from lonelypss.ws.state import State, StateAccepting, StateType
 
 router = APIRouter()
 
@@ -298,7 +297,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     config = get_config_from_request(websocket)
     receiver = get_ws_receiver_from_request(websocket)
 
-    state = StateAccepting(
+    state: State = StateAccepting(
         type=StateType.ACCEPTING,
         websocket=websocket,
         broadcaster_config=config,

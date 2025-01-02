@@ -21,6 +21,7 @@ async def handle_any(state: State) -> State:
 
     Raises KeyError if no handler is found for the state type.
     """
+    print(f"handling {state=}")
     return await _handlers[state.type](state)
 
 

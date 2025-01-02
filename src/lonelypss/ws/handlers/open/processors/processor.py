@@ -3,6 +3,10 @@ from typing import TYPE_CHECKING, cast
 from lonelypsp.stateful.constants import SubscriberToBroadcasterStatefulMessageType
 from lonelypsp.stateful.message import S2B_Message
 
+from lonelypss.ws.handlers.open.processors.process_notify_stream import (
+    process_notify_stream,
+)
+from lonelypss.ws.handlers.open.processors.process_notify import process_notify
 from lonelypss.ws.handlers.open.processors.process_subscribe_exact import (
     process_subscribe_exact,
 )
@@ -19,6 +23,8 @@ from lonelypss.ws.handlers.open.processors.protocol import S2B_MessageProcessor
 from lonelypss.ws.state import StateOpen
 
 PROCESSORS = {
+    SubscriberToBroadcasterStatefulMessageType.NOTIFY_STREAM: process_notify_stream,
+    SubscriberToBroadcasterStatefulMessageType.NOTIFY: process_notify,
     SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_EXACT: process_subscribe_exact,
     SubscriberToBroadcasterStatefulMessageType.SUBSCRIBE_GLOB: process_subscribe_glob,
     SubscriberToBroadcasterStatefulMessageType.UNSUBSCRIBE_EXACT: process_unsubscribe_exact,

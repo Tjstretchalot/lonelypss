@@ -90,6 +90,14 @@ async def receive_for_websockets(
             content=b'{"unsubscribe": true, "reason": "unparseable sha-512 repr-digest (not base64)"}',
         )
 
+    request_url = str(request.url)
+    if request_url != receiver.receiver_url:
+        return Response(
+            status_code=400,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            content=b'{"unsubscribe": true, "reason": "invalid receiver URL"}',
+        )
+
     auth_result = await config.is_receive_allowed(
         url=str(request.url),
         topic=topic,

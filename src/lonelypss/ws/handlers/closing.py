@@ -1,5 +1,7 @@
 from typing import TYPE_CHECKING
 
+from fastapi.websockets import WebSocketState
+
 from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.state import State, StateClosed, StateType
 
@@ -10,7 +12,8 @@ async def handle_closing(state: State) -> State:
     """
 
     assert state.type == StateType.CLOSING
-    await state.websocket.close()
+    if state.websocket.client_state != WebSocketState.DISCONNECTED:
+        await state.websocket.close()
     if state.exception is not None:
         raise state.exception
     return StateClosed(type=StateType.CLOSED)
