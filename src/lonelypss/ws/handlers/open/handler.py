@@ -152,6 +152,11 @@ async def handle_open(state: State) -> State:
             except BaseException as e2:
                 cleanup_exceptions.append(e2)
 
+        try:
+            await state.client_session.close()
+        except BaseException as e2:
+            cleanup_exceptions.append(e2)
+
         result_exception: Optional[BaseException] = None
 
         if cleanup_exceptions:
