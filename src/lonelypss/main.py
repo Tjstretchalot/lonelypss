@@ -1,3 +1,4 @@
+# ruff: noqa: T201
 import json
 import os
 import secrets
@@ -274,7 +275,9 @@ def _make_config() -> Config:{load_auth_secrets}
 
 
 config = _make_config()
-fanout = SimpleFanoutWSReceiver(receiver_url="http://127.0.0.1:3003", db=config)
+fanout = SimpleFanoutWSReceiver(
+    receiver_url="http://127.0.0.1:3003/v1/receive_for_websockets", db=config
+)
 
 
 @asynccontextmanager

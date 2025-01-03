@@ -486,8 +486,16 @@ class SimpleFanoutWSReceiver:
                 raise ValueError(f"failed to unsubscribe from {glob!r}: {result}")
 
     def is_relevant(self, topic: bytes) -> bool:
-        return topic in self.exact_subscriptions or any(
-            glob.pattern.match(topic) for glob in self.glob_subscriptions.values()
+        if topic in self.exact_subscriptions:
+            return True
+
+        try:
+            topic_str = topic.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return False
+
+        return any(
+            glob.pattern.match(topic_str) for glob in self.glob_subscriptions.values()
         )
 
     async def on_large_exclusive_incoming(

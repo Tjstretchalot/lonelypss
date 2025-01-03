@@ -46,4 +46,4 @@ standard = [
 target-version = "py311"
 
 [tool.ruff.lint]
-extend-select = ["I"]
+extend-select = ["I", "T201"]

@@ -22,9 +22,15 @@ class SimpleReceiver:
         )
 
     def is_relevant(self, topic: bytes) -> bool:
-        return topic in self.exact_subscriptions or any(
-            pattern.match(topic) for pattern, _ in self.glob_subscriptions
-        )
+        if topic in self.exact_subscriptions:
+            return True
+
+        try:
+            topic_str = topic.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return False
+
+        return any(pattern.match(topic_str) for pattern, _ in self.glob_subscriptions)
 
     async def on_large_exclusive_incoming(
         self,
