@@ -7,6 +7,10 @@ import sqlite3
 import time
 from typing import TYPE_CHECKING, Literal, Optional, Protocol, Tuple, Type, Union, cast
 
+from lonelypsp.stateless.make_strong_etag import StrongEtag
+
+from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
+
 if TYPE_CHECKING:
     from lonelypss.config.auth_config import (
         IncomingAuthConfig,
@@ -398,6 +402,61 @@ class IncomingHmacAuth:
             ]
         )
         return await self._check_broadcaster_token(to_sign, hmac_token)
+
+    async def is_check_subscriptions_allowed(
+        self, /, *, url: str, now: float, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        result = self._get_token(authorization, now)
+        if result[0] != "found":
+            return result[0]
+
+        timestamp, nonce, hmac_token = result[1]
+        encoded_url = url.encode("utf-8")
+        encoded_timestamp = timestamp.to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(encoded_url).to_bytes(2, "big"),
+                encoded_url,
+            ]
+        )
+        return await self._check_subscriber_token(to_sign, hmac_token)
+
+    async def is_set_subscriptions_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        result = self._get_token(authorization, now)
+        if result[0] != "found":
+            return result[0]
+
+        timestamp, nonce, hmac_token = result[1]
+        encoded_url = url.encode("utf-8")
+        encoded_etag = strong_etag.format.to_bytes(1, "big") + strong_etag.etag
+        encoded_timestamp = timestamp.to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(encoded_url).to_bytes(2, "big"),
+                encoded_url,
+                encoded_etag,
+            ]
+        )
+        return await self._check_subscriber_token(to_sign, hmac_token)
 
 
 class OutgoingHmacAuth:

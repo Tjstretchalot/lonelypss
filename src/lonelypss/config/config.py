@@ -14,7 +14,10 @@ from typing import (
     Union,
 )
 
+from lonelypsp.stateless.make_strong_etag import StrongEtag
+
 from lonelypss.config.auth_config import AuthConfig
+from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 try:
     import zstandard
@@ -119,6 +122,61 @@ class DBConfig(Protocol):
         Returns:
             `success`: if the subscription was removed
             `not_found`: if the subscription didn't exist
+            `unavailable`: if the database for subscriptions is unavailable
+        """
+
+    async def check_subscriptions(self, /, *, url: str) -> StrongEtag:
+        """Determines what the current subscriptions are for a given URL, computing
+        the strong etag corresponding to that url and set of subscriptions, and
+        returning that.
+
+        NOTE: the strong etag format is designed to be computable without loading
+        all the subscriptions into memory but does require a linear pass over the
+        relevant subscriptions.
+
+        NOTE: typically, paginate through results and use create_strong_etag_generator
+
+        NOTE: if the subscriptions are mutated while this is running the result must
+        be an etag that includes every item that was in the database the entire
+        iteration, must not include any item that was not in the database the entire
+        iteration, and must not include duplicates. Items that were added or removed
+        during the iteration may be arbitrarily included or excluded from the etag.
+
+        Args:
+            url (str): the url that we are checking
+
+        Returns:
+            StrongEtag: the strong etag for the subscriptions
+        """
+
+    async def set_subscriptions(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+    ) -> Literal["success", "unavailable"]:
+        """Sets the subscriptions for a given URL to the given topics and globs.
+        This does not need to be completely atomic, though it is desirable. If
+        it is not atomic, the following rules must be met:
+
+        - any subscription not in subscriptions is removed (as if via unsubscribe_exact or unsubscribe_glob
+          during this call)
+        - any subscription in subscriptions is added if not already present (as if via subscribe_exact or
+          subscribe_glob during this call, ignoring conflict)
+
+        Args:
+            url (str): the url that will receive notifications
+            strong_etag (StrongEtag): the etag that was returned from the last check_subscriptions call
+            subscriptions (SetSubscriptionsInfo): the topics and globs that the
+                subscriber wants to receive. this list may be large, so a more
+                restrictive interface is provided to provide flexibility in its
+                implementation
+
+        Returns:
+            `success`: if the subscriptions were set
+            `conflict`: if the etag didn't match the current state of the database
             `unavailable`: if the database for subscriptions is unavailable
         """
 
@@ -584,6 +642,31 @@ class ConfigFromParts:
             authorization=authorization,
         )
 
+    async def is_check_subscriptions_allowed(
+        self, /, *, url: str, now: float, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_check_subscriptions_allowed(
+            url=url, now=now, authorization=authorization
+        )
+
+    async def is_set_subscriptions_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_set_subscriptions_allowed(
+            url=url,
+            strong_etag=strong_etag,
+            subscriptions=subscriptions,
+            now=now,
+            authorization=authorization,
+        )
+
     async def setup_authorization(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
     ) -> Optional[str]:
@@ -613,6 +696,21 @@ class ConfigFromParts:
 
     def get_subscribers(self, /, *, topic: bytes) -> AsyncIterable[SubscriberInfo]:
         return self.db.get_subscribers(topic=topic)
+
+    async def check_subscriptions(self, /, *, url: str) -> StrongEtag:
+        return await self.db.check_subscriptions(url=url)
+
+    async def set_subscriptions(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+    ) -> Literal["success", "unavailable"]:
+        return await self.db.set_subscriptions(
+            url=url, strong_etag=strong_etag, subscriptions=subscriptions
+        )
 
     @property
     def message_body_spool_size(self) -> int:

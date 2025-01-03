@@ -1,11 +1,26 @@
 import sqlite3
-from typing import TYPE_CHECKING, AsyncIterable, Literal, Optional, Type
+from typing import (
+    TYPE_CHECKING,
+    AsyncIterable,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    cast,
+)
+
+from lonelypsp.stateless.make_strong_etag import (
+    StrongEtag,
+    create_strong_etag_generator,
+)
 
 from lonelypss.config.config import (
     SubscriberInfo,
     SubscriberInfoExact,
     SubscriberInfoGlob,
 )
+from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 if TYPE_CHECKING:
     from lonelypss.config.config import DBConfig
@@ -178,6 +193,138 @@ WHERE
                 if row is None:
                     break
                 yield SubscriberInfoGlob(type="glob", glob=row[0], url=row[1])
+        finally:
+            cursor.close()
+
+    async def check_subscriptions(self, /, *, url: str) -> StrongEtag:
+        assert self.connection is not None, "db not setup"
+
+        topics_gen = create_strong_etag_generator(url)
+
+        cursor = self.connection.cursor()
+        try:
+            last_topic: Optional[bytes] = None
+            while True:
+                cursor.execute(
+                    "SELECT exact "
+                    "FROM httppubsub_subscription_exacts "
+                    "WHERE url = ?"
+                    " AND (? IS NULL OR exact > ?) "
+                    "ORDER BY exact ASC "
+                    "LIMIT 100",
+                    (url, last_topic, last_topic),
+                )
+
+                topics_batch = cast(List[Tuple[bytes]], cursor.fetchall())
+                if not topics_batch:
+                    break
+
+                topics_gen.add_topic(*(topic[0] for topic in topics_batch))
+
+                last_topic = topics_batch[-1][0]
+
+            globs_gen = topics_gen.finish_topics()
+            del topics_gen
+
+            last_glob: Optional[str] = None
+            while True:
+                cursor.execute(
+                    "SELECT glob "
+                    "FROM httppubsub_subscription_globs "
+                    "WHERE url = ?"
+                    " AND (? IS NULL OR glob > ?) "
+                    "ORDER BY glob ASC "
+                    "LIMIT 100",
+                    (url, last_glob, last_glob),
+                )
+
+                globs_batch = cast(List[Tuple[str]], cursor.fetchall())
+                if not globs_batch:
+                    break
+
+                globs_gen.add_glob(*(glob[0] for glob in globs_batch))
+
+                last_glob = globs_batch[-1][0]
+
+            return globs_gen.finish()
+        finally:
+            cursor.close()
+
+    async def set_subscriptions(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+    ) -> Literal["success", "unavailable"]:
+        assert self.connection is not None, "db not setup"
+
+        cursor = self.connection.cursor()
+        try:
+            topics_batch: List[bytes] = []
+            topics_iter = subscriptions.topics()
+            saw_stop = False
+            while True:
+                if saw_stop or len(topics_batch) >= 100:
+                    topics_batch.extend([url, url])  # type: ignore
+                    cursor.execute(
+                        "WITH batch(exact) AS (VALUES "
+                        + ",".join("(?)" for _ in topics_batch)
+                        + ") INSERT INTO httppubsub_subscription_exacts (url, exact) "
+                        "SELECT ?, batch.exact FROM batch "
+                        "WHERE"
+                        " NOT EXISTS ("
+                        "SELECT 1 FROM httppubsub_subscription_exacts AS hse "
+                        "WHERE hse.url = ? AND hse.exact = batch.exact"
+                        ")",
+                        topics_batch,
+                    )
+                    self.connection.commit()
+                    topics_batch.clear()
+
+                    if saw_stop:
+                        break
+
+                try:
+                    topics_batch.append(await topics_iter.__anext__())
+                except StopAsyncIteration:
+                    saw_stop = True
+                    if not topics_batch:
+                        break
+
+            globs_batch: List[str] = []
+            globs_iter = subscriptions.globs()
+            saw_stop = False
+            while True:
+                if saw_stop or len(globs_batch) >= 100:
+                    globs_batch.extend([url, url])
+                    cursor.execute(
+                        "WITH batch(glob) AS (VALUES "
+                        + ",".join("(?)" for _ in globs_batch)
+                        + ") INSERT INTO httppubsub_subscription_globs (url, glob) "
+                        "SELECT ?, batch.glob FROM batch "
+                        "WHERE"
+                        " NOT EXISTS ("
+                        "SELECT 1 FROM httppubsub_subscription_globs AS hsg "
+                        "WHERE hsg.url = ? AND hsg.glob = batch.glob"
+                        ")",
+                        globs_batch,
+                    )
+                    self.connection.commit()
+                    globs_batch.clear()
+
+                    if saw_stop:
+                        break
+
+                try:
+                    globs_batch.append(await globs_iter.__anext__())
+                except StopAsyncIteration:
+                    saw_stop = True
+                    if not globs_batch:
+                        break
+
+            return "success"
         finally:
             cursor.close()
 

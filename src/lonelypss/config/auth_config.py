@@ -1,4 +1,14 @@
-from typing import TYPE_CHECKING, Literal, Optional, Protocol, Type
+from typing import (
+    TYPE_CHECKING,
+    Literal,
+    Optional,
+    Protocol,
+    Type,
+)
+
+from lonelypsp.stateless.make_strong_etag import StrongEtag
+
+from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 
 class IncomingAuthConfig(Protocol):
@@ -111,6 +121,62 @@ class IncomingAuthConfig(Protocol):
             `forbidden`: if the authorization header is provided but invalid
             `unavailable`: if a service is required to check this isn't available.
               the message will be dropped.
+        """
+
+    async def is_check_subscriptions_allowed(
+        self, /, *, url: str, now: float, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        """Determines if the given authorization is sufficient to retrieve the strong
+        etag that identifies the url and its current subscriptions (both exact and glob).
+
+        Args:
+            url (str): the url whose subscriptions are being checked
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+            authorization (str, None): the authorization header they provided
+
+        Returns:
+            `ok`: if the request is allowed
+            `unauthorized`: if the authorization header is required but not provided
+            `forbidden`: if the authorization header is provided but invalid
+            `unavailable`: if a service is required to check this isn't available
+        """
+
+    async def is_set_subscriptions_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        """Determines if the given authorization is sufficient to set the
+        subscriptions for the given url; this removes any existing subscriptions
+        and replaces them with those provided.
+
+        Ideally the authorization would not need to actually iterate the topics
+        and globs, but in practice that is too great a restriction, so instead
+        the iterable is async, single-use, and can detect if it was unused, allowing
+        the implementation the maximum flexibility to make performance optimizations
+        while still allowing the obvious desired case of some users can only subscribe
+        to certain prefixes
+
+        WARN: when this function returns, `subscriptions` will no longer be usable
+
+        Args:
+            url (str): the url whose subscriptions are being set
+            strong_etag (StrongEtag): the strong etag that will be verified before
+                actually setting subscriptions, but may not have been verified yet.
+            subscriptions (SetSubscriptionsInfo): the subscriptions to set
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+            authorization (str, None): the authorization header they provided
+
+        Returns:
+            `ok`: if the request is allowed
+            `unauthorized`: if the authorization header is required but not provided
+            `forbidden`: if the authorization header is provided but invalid
+            `unavailable`: if a service is required to check this isn't available
         """
 
 
@@ -227,6 +293,31 @@ class AuthConfigFromParts:
             url=url,
             topic=topic,
             message_sha512=message_sha512,
+            now=now,
+            authorization=authorization,
+        )
+
+    async def is_check_subscriptions_allowed(
+        self, /, *, url: str, now: float, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.incoming.is_check_subscriptions_allowed(
+            url=url, now=now, authorization=authorization
+        )
+
+    async def is_set_subscriptions_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.incoming.is_set_subscriptions_allowed(
+            url=url,
+            strong_etag=strong_etag,
+            subscriptions=subscriptions,
             now=now,
             authorization=authorization,
         )

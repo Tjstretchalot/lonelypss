@@ -1,5 +1,9 @@
 from typing import TYPE_CHECKING, Literal, Optional, Type
 
+from lonelypsp.stateless.make_strong_etag import StrongEtag
+
+from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
+
 if TYPE_CHECKING:
     from lonelypss.config.auth_config import (
         IncomingAuthConfig,
@@ -46,6 +50,23 @@ class IncomingNoneAuth:
         url: str,
         topic: bytes,
         message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return "ok"
+
+    async def is_check_subscriptions_allowed(
+        self, /, *, url: str, now: float, authorization: Optional[str]
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return "ok"
+
+    async def is_set_subscriptions_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        strong_etag: StrongEtag,
+        subscriptions: SetSubscriptionsInfo,
         now: float,
         authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
