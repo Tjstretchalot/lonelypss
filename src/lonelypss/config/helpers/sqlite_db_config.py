@@ -262,6 +262,14 @@ WHERE
 
         cursor = self.connection.cursor()
         try:
+            cursor.execute(
+                "DELETE FROM httppubsub_subscription_exacts WHERE url = ?", (url,)
+            )
+            cursor.execute(
+                "DELETE FROM httppubsub_subscription_globs WHERE url = ?", (url,)
+            )
+            self.connection.commit()
+
             topics_batch: List[bytes] = []
             topics_iter = subscriptions.topics()
             saw_stop = False
@@ -270,7 +278,7 @@ WHERE
                     topics_batch.extend([url, url])  # type: ignore
                     cursor.execute(
                         "WITH batch(exact) AS (VALUES "
-                        + ",".join("(?)" for _ in topics_batch)
+                        + ",".join(["(?)"] * (len(topics_batch) - 2))
                         + ") INSERT INTO httppubsub_subscription_exacts (url, exact) "
                         "SELECT ?, batch.exact FROM batch "
                         "WHERE"
@@ -301,7 +309,7 @@ WHERE
                     globs_batch.extend([url, url])
                     cursor.execute(
                         "WITH batch(glob) AS (VALUES "
-                        + ",".join("(?)" for _ in globs_batch)
+                        + ",".join(["(?)"] * (len(globs_batch) - 2))
                         + ") INSERT INTO httppubsub_subscription_globs (url, glob) "
                         "SELECT ?, batch.glob FROM batch "
                         "WHERE"
