@@ -159,12 +159,8 @@ class DBConfig(Protocol):
     ) -> Literal["success", "unavailable"]:
         """Sets the subscriptions for a given URL to the given topics and globs.
         This does not need to be completely atomic, though it is desirable. If
-        it is not atomic, the following rules must be met:
-
-        - any subscription not in subscriptions is removed (as if via unsubscribe_exact or unsubscribe_glob
-          during this call)
-        - any subscription in subscriptions is added if not already present (as if via subscribe_exact or
-          subscribe_glob during this call, ignoring conflict)
+        it is not atomic, the rules within lonelypsp's documentation for
+        `SET_SUBSCRIPTION` must be followed
 
         Args:
             url (str): the url that will receive notifications
@@ -172,7 +168,8 @@ class DBConfig(Protocol):
             subscriptions (SetSubscriptionsInfo): the topics and globs that the
                 subscriber wants to receive. this list may be large, so a more
                 restrictive interface is provided to provide flexibility in its
-                implementation
+                implementation. the list is guarranteed to be in ascending lexicographic
+                order for the topics/globs
 
         Returns:
             `success`: if the subscriptions were set

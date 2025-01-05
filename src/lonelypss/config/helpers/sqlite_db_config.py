@@ -2,11 +2,14 @@ import sqlite3
 from typing import (
     TYPE_CHECKING,
     AsyncIterable,
+    AsyncIterator,
+    Iterable,
     List,
     Literal,
     Optional,
     Tuple,
     Type,
+    Union,
     cast,
 )
 
@@ -14,6 +17,7 @@ from lonelypsp.stateless.make_strong_etag import (
     StrongEtag,
     create_strong_etag_generator,
 )
+from lonelypsp.util.bounded_deque import BoundedDeque
 
 from lonelypss.config.config import (
     SubscriberInfo,
@@ -24,6 +28,34 @@ from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 if TYPE_CHECKING:
     from lonelypss.config.config import DBConfig
+
+import sys
+
+if sys.version_info < (3, 10):
+    from enum import Enum, auto
+    from typing import TypeVar, overload
+
+    class _NotSet(Enum):
+        NOT_SET = auto()
+
+    T = TypeVar("T")
+    D = TypeVar("D")
+
+    @overload
+    async def anext(iterable: AsyncIterable[T]) -> T: ...
+
+    @overload
+    async def anext(iterable: AsyncIterable[T], default: D, /) -> Union[T, D]: ...
+
+    async def anext(
+        iterable: AsyncIterable[T], default: Optional[D] = _NotSet.NOT_SET, /
+    ) -> Union[T, D]:
+        try:
+            return await iterable.__anext__()
+        except StopAsyncIteration:
+            if default is _NotSet.NOT_SET:
+                raise
+            return cast(D, default)
 
 
 class SqliteDBConfig:
@@ -262,80 +294,164 @@ WHERE
 
         cursor = self.connection.cursor()
         try:
-            cursor.execute(
-                "DELETE FROM httppubsub_subscription_exacts WHERE url = ?", (url,)
+            await self._set_topics(
+                cursor=cursor, url=url, desired_topics_iter=subscriptions.topics()
             )
-            cursor.execute(
-                "DELETE FROM httppubsub_subscription_globs WHERE url = ?", (url,)
+            await self._set_globs(
+                cursor=cursor, url=url, desired_globs_iter=subscriptions.globs()
             )
-            self.connection.commit()
-
-            topics_batch: List[bytes] = []
-            topics_iter = subscriptions.topics()
-            saw_stop = False
-            while True:
-                if saw_stop or len(topics_batch) >= 100:
-                    topics_batch.extend([url, url])  # type: ignore
-                    cursor.execute(
-                        "WITH batch(exact) AS (VALUES "
-                        + ",".join(["(?)"] * (len(topics_batch) - 2))
-                        + ") INSERT INTO httppubsub_subscription_exacts (url, exact) "
-                        "SELECT ?, batch.exact FROM batch "
-                        "WHERE"
-                        " NOT EXISTS ("
-                        "SELECT 1 FROM httppubsub_subscription_exacts AS hse "
-                        "WHERE hse.url = ? AND hse.exact = batch.exact"
-                        ")",
-                        topics_batch,
-                    )
-                    self.connection.commit()
-                    topics_batch.clear()
-
-                    if saw_stop:
-                        break
-
-                try:
-                    topics_batch.append(await topics_iter.__anext__())
-                except StopAsyncIteration:
-                    saw_stop = True
-                    if not topics_batch:
-                        break
-
-            globs_batch: List[str] = []
-            globs_iter = subscriptions.globs()
-            saw_stop = False
-            while True:
-                if saw_stop or len(globs_batch) >= 100:
-                    globs_batch.extend([url, url])
-                    cursor.execute(
-                        "WITH batch(glob) AS (VALUES "
-                        + ",".join(["(?)"] * (len(globs_batch) - 2))
-                        + ") INSERT INTO httppubsub_subscription_globs (url, glob) "
-                        "SELECT ?, batch.glob FROM batch "
-                        "WHERE"
-                        " NOT EXISTS ("
-                        "SELECT 1 FROM httppubsub_subscription_globs AS hsg "
-                        "WHERE hsg.url = ? AND hsg.glob = batch.glob"
-                        ")",
-                        globs_batch,
-                    )
-                    self.connection.commit()
-                    globs_batch.clear()
-
-                    if saw_stop:
-                        break
-
-                try:
-                    globs_batch.append(await globs_iter.__anext__())
-                except StopAsyncIteration:
-                    saw_stop = True
-                    if not globs_batch:
-                        break
-
             return "success"
         finally:
             cursor.close()
 
+    async def _set_topics(
+        self,
+        /,
+        *,
+        cursor: sqlite3.Cursor,
+        url: str,
+        desired_topics_iter: AsyncIterator[bytes],
+    ) -> None:
+        actual_topics_iter = _ExistingTopicsIter(cursor, url)
+
+        next_desired: Optional[bytes] = await anext(desired_topics_iter, None)
+        next_actual: Optional[bytes] = next(actual_topics_iter, None)
+
+        while next_desired is not None or next_actual is not None:
+            if next_desired is None:
+                cursor.execute(
+                    "DELETE FROM httppubsub_subscription_exacts "
+                    "WHERE url = ? AND exact >= ?",
+                    (url, next_actual),
+                )
+                next_actual = None
+            elif next_actual is None:
+                await self.subscribe_exact(url=url, exact=next_desired)
+                next_desired = await anext(desired_topics_iter, None)
+            elif next_desired < next_actual:
+                await self.subscribe_exact(url=url, exact=next_desired)
+                next_desired = await anext(desired_topics_iter, None)
+            elif next_desired > next_actual:
+                await self.unsubscribe_exact(url=url, exact=next_actual)
+                next_actual = next(actual_topics_iter, None)
+            else:
+                next_desired = await anext(desired_topics_iter, None)
+                next_actual = next(actual_topics_iter, None)
+
+    async def _set_globs(
+        self,
+        /,
+        *,
+        cursor: sqlite3.Cursor,
+        url: str,
+        desired_globs_iter: AsyncIterator[str],
+    ) -> None:
+        actual_globs_iter = _ExistingGlobsIter(cursor, url)
+
+        next_desired: Optional[str] = await anext(desired_globs_iter, None)
+        next_actual: Optional[str] = next(actual_globs_iter, None)
+
+        while next_desired is not None or next_actual is not None:
+            if next_desired is None:
+                cursor.execute(
+                    "DELETE FROM httppubsub_subscription_globs "
+                    "WHERE url = ? AND glob >= ?",
+                    (url, next_actual),
+                )
+                next_actual = None
+            elif next_actual is None:
+                await self.subscribe_glob(url=url, glob=next_desired)
+                next_desired = await anext(desired_globs_iter, None)
+            elif next_desired < next_actual:
+                await self.subscribe_glob(url=url, glob=next_desired)
+                next_desired = await anext(desired_globs_iter, None)
+            elif next_desired > next_actual:
+                await self.unsubscribe_glob(url=url, glob=next_actual)
+                next_actual = next(actual_globs_iter, None)
+            else:
+                next_desired = await anext(desired_globs_iter, None)
+                next_actual = next(actual_globs_iter, None)
+
+
+class _ExistingTopicsIter:
+    def __init__(self, cursor: sqlite3.Cursor, url: str, batch_size: int = 16) -> None:
+        self.cursor = cursor
+        self.url = url
+        self.batch_size = batch_size
+
+        self.batch_remaining: BoundedDeque[bytes] = BoundedDeque(maxlen=batch_size)
+        self.last_topic: Optional[bytes] = None
+        self.at_last_batch: bool = False
+
+    def __iter__(self) -> "_ExistingTopicsIter":
+        return self
+
+    def __next__(self) -> bytes:
+        if not self.batch_remaining and not self.at_last_batch:
+            self._get_next_batch()
+
+        if not self.batch_remaining:
+            raise StopIteration
+
+        return self.batch_remaining.popleft()
+
+    def _get_next_batch(self) -> None:
+        self.cursor.execute(
+            "SELECT exact "
+            "FROM httppubsub_subscription_exacts "
+            "WHERE url = ?"
+            " AND (? IS NULL OR exact > ?) "
+            "ORDER BY exact ASC "
+            "LIMIT ?",
+            (self.url, self.last_topic, self.last_topic, self.batch_size),
+        )
+        raw_batch: List[Tuple[bytes]] = self.cursor.fetchall()
+        self.batch_remaining.ensure_space_for(len(raw_batch))
+        for row in raw_batch:
+            self.batch_remaining.append(row[0])
+        self.at_last_batch = len(raw_batch) < self.batch_size
+
+
+class _ExistingGlobsIter:
+    def __init__(self, cursor: sqlite3.Cursor, url: str, batch_size: int = 16) -> None:
+        self.cursor = cursor
+        self.url = url
+        self.batch_size = batch_size
+
+        self.batch_remaining: BoundedDeque[str] = BoundedDeque(maxlen=batch_size)
+        self.last_glob: Optional[str] = None
+        self.at_last_batch: bool = False
+
+    def __iter__(self) -> "_ExistingGlobsIter":
+        return self
+
+    def __next__(self) -> str:
+        if not self.batch_remaining and not self.at_last_batch:
+            self._get_next_batch()
+
+        if not self.batch_remaining:
+            raise StopIteration
+
+        return self.batch_remaining.popleft()
+
+    def _get_next_batch(self) -> None:
+        self.cursor.execute(
+            "SELECT glob "
+            "FROM httppubsub_subscription_globs "
+            "WHERE url = ?"
+            " AND (? IS NULL OR glob > ?) "
+            "ORDER BY glob ASC "
+            "LIMIT ?",
+            (self.url, self.last_glob, self.last_glob, self.batch_size),
+        )
+        raw_batch: List[Tuple[str]] = self.cursor.fetchall()
+        self.batch_remaining.ensure_space_for(len(raw_batch))
+        for row in raw_batch:
+            self.batch_remaining.append(row[0])
+        self.at_last_batch = len(raw_batch) < self.batch_size
+
 
 if TYPE_CHECKING:
     _: Type[DBConfig] = SqliteDBConfig
+    __: Type[Iterable[bytes]] = _ExistingTopicsIter
+    ___: Type[Iterable[str]] = _ExistingGlobsIter

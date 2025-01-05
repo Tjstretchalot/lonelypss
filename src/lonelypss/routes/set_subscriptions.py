@@ -330,11 +330,8 @@ async def check_subscriptions(
       to use this to clear out the subscriptions, then add them via separate
       subscribe calls to allow for resumable processing
 
-    NOTE: this is not atomic; there will be periods where the subscriptions
-    are in an intermediate state. Critically, this means if the subscriber
-    has subscriptions already they may miss messages using this endpoint. This
-    allows this endpoint to support a large number of subscriptions without
-    blocking other writes
+    NOTE: this is not atomic but there are some guarrantees; see the lonelypsp
+    documentation for stateless `SET_SUBSCRIPTION`
 
     ### request body
     - 2 bytes (N): length of the subscriber url to set, big-endian, unsigned
@@ -342,11 +339,11 @@ async def check_subscriptions(
     - 1 byte (reserved for etag format): 0
     - 64 bytes: the strong etag, will be rechecked
     - 4 bytes (E): the number of exact topics to set, big-endian, unsigned
-    - REPEAT E TIMES:
+    - REPEAT E TIMES: (in ascending lexicographic order)
       - 2 bytes (L): length of the topic, big-endian, unsigned
       - L bytes: the topic
     - 4 bytes (G): the number of glob patterns to set, big-endian, unsigned
-    - REPEAT G TIMES:
+    - REPEAT G TIMES: (in ascending lexicographic order)
       - 2 bytes (L): length of the glob pattern, big-endian, unsigned
       - L bytes: the glob pattern, utf-8 encoded
 
@@ -410,7 +407,7 @@ async def check_subscriptions(
 
             # check etag was actually correct
             subs_info_buffer.seek(0, os.SEEK_SET)
-            topics_gen = create_strong_etag_generator(url)
+            topics_gen = create_strong_etag_generator(url, recheck_sort=True)
             with _SubscriptionInfoFromSyncStream(subs_info_buffer) as subscription_info:
                 async for topic in subscription_info.topics():
                     topics_gen.add_topic(topic)
