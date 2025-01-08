@@ -58,7 +58,7 @@ if sys.version_info < (3, 10):
 
     async def anext(
         iterable: AsyncIterator[T],
-        default: Any = None,
+        default: Any = _NotSet.NOT_SET,
         /,
     ) -> Any:
         try:
