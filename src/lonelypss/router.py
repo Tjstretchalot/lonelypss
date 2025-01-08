@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 import lonelypss.routes.check_subscriptions
+import lonelypss.routes.missed_for_websockets
 import lonelypss.routes.notify
 import lonelypss.routes.receive_for_websockets
 import lonelypss.routes.set_subscriptions
@@ -12,6 +13,7 @@ import lonelypss.routes.websocket_endpoint
 
 router = APIRouter()
 router.include_router(lonelypss.routes.check_subscriptions.router)
+router.include_router(lonelypss.routes.missed_for_websockets.router)
 router.include_router(lonelypss.routes.notify.router)
 router.include_router(lonelypss.routes.receive_for_websockets.router)
 router.include_router(lonelypss.routes.set_subscriptions.router)

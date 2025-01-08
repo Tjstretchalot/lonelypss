@@ -25,12 +25,21 @@ class IncomingAuthConfig(Protocol):
         """
 
     async def is_subscribe_exact_allowed(
-        self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        exact: bytes,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         """Determines if the given url can (un)subscribe to the given exact match.
 
         Args:
             url (str): the url that will receive notifications
+            recovery (str, None): the url that will receive MISSED messages for this
+                subscription, if any
             exact (bytes): the exact topic they want to receive messages from
             now (float): the current time in seconds since the epoch, as if from `time.time()`
             authorization (str, None): the authorization header they provided
@@ -43,12 +52,21 @@ class IncomingAuthConfig(Protocol):
         """
 
     async def is_subscribe_glob_allowed(
-        self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        glob: str,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         """Determines if the given url can (un)subscribe to the given glob-style match
 
         Args:
             url (str): the url that will receive notifications
+            recovery (str, None): the url that will receive MISSED messages for this
+                subscription, if any
             glob (str): a glob for the topics that they want to receive notifications from
             now (float): the current time in seconds since the epoch, as if from `time.time()`
             authorization (str, None): the authorization header they provided
@@ -121,6 +139,32 @@ class IncomingAuthConfig(Protocol):
             `forbidden`: if the authorization header is provided but invalid
             `unavailable`: if a service is required to check this isn't available.
               the message will be dropped.
+        """
+
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        """Determines if the indication that the broadcaster missed a message from
+        another broadcaster is allowed. This allows the broadcaster to forward this
+        information to subscribers to that topic which can trigger recovery.
+
+        Args:
+            recovery (str): the url the missed message was sent to
+            topic (bytes): the topic the message was on
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+            authorization (str, None): the authorization header they provided
+
+        Returns:
+            `ok`: if the message is allowed
+            `unauthorized`: if the authorization header is required but not provided
+            `forbidden`: if the authorization header is provided but invalid
+            `unavailable`: if a service is required to check this isn't available
         """
 
     async def is_check_subscriptions_allowed(
@@ -224,6 +268,29 @@ class OutgoingAuthConfig(Protocol):
             str, None: the authorization header to use, if any
         """
 
+    async def setup_missed(
+        self, /, *, recovery: str, topic: bytes, now: float
+    ) -> Optional[str]:
+        """Sets up the authorization header that the broadcaster should use when
+        contacting the given url about a missed message on the given topic at
+        approximately the given time. The contents of the message are not sent
+        nor necessarily available; this is just to inform the subscriber that
+        they may have missed a message. They may have their own log that they
+        can recovery the message with if necessary.
+
+        When sending this over a websocket, the recovery url is of the form
+        `websocket:<nonce>:<ctr>`, where more details can be found in the
+        stateful documentation in lonelypsp
+
+        Args:
+            recovery (str): the url that will receive the missed message
+            topic (bytes): the topic that the message was on
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+
+        Returns:
+            str, None: the authorization header to use, if any
+        """
+
 
 class AuthConfig(IncomingAuthConfig, OutgoingAuthConfig, Protocol): ...
 
@@ -250,17 +317,35 @@ class AuthConfigFromParts:
         await self.outgoing.teardown_outgoing_auth()
 
     async def is_subscribe_exact_allowed(
-        self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        exact: bytes,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.incoming.is_subscribe_exact_allowed(
-            url=url, exact=exact, now=now, authorization=authorization
+            url=url,
+            recovery=recovery,
+            exact=exact,
+            now=now,
+            authorization=authorization,
         )
 
     async def is_subscribe_glob_allowed(
-        self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        glob: str,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.incoming.is_subscribe_glob_allowed(
-            url=url, glob=glob, now=now, authorization=authorization
+            url=url, recovery=recovery, glob=glob, now=now, authorization=authorization
         )
 
     async def is_notify_allowed(
@@ -297,6 +382,19 @@ class AuthConfigFromParts:
             authorization=authorization,
         )
 
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.incoming.is_missed_allowed(
+            recovery=recovery, topic=topic, now=now, authorization=authorization
+        )
+
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -328,6 +426,11 @@ class AuthConfigFromParts:
         return await self.outgoing.setup_authorization(
             url=url, topic=topic, message_sha512=message_sha512, now=now
         )
+
+    async def setup_missed(
+        self, /, *, recovery: str, topic: bytes, now: float
+    ) -> Optional[str]:
+        return await self.outgoing.setup_missed(recovery=recovery, topic=topic, now=now)
 
 
 if TYPE_CHECKING:

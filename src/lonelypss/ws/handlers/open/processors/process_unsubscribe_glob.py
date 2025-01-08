@@ -27,7 +27,11 @@ async def process_unsubscribe_glob(
     url = make_for_receive_websocket_url_and_change_counter(state)
     auth_at = time.time()
     auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
-        url=url, glob=message.glob, now=auth_at, authorization=message.authorization
+        url=url,
+        recovery=None,
+        glob=message.glob,
+        now=auth_at,
+        authorization=message.authorization,
     )
     if auth_result != "ok":
         raise AuthRejectedException(f"subscribe exact: {auth_result}")

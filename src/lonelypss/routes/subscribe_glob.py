@@ -32,6 +32,9 @@ async def subscribe(
     - N bytes: the url. must be valid utf-8
     - 2 bytes (M): the length of the glob.
     - M bytes: the glob. must be valid utf-8
+    - 2 bytes (R): either 0, to indicate no missed messages are desired, or the length
+      of the url to post missed messages to, big-endian, unsigned
+    - R bytes: the url to post missed messages to, utf-8 encoded
 
     NOTE: if you want to use the same path and glob for multiple subscriptions
     to get multiple notifications, you can include a hash that disambiguates them,
@@ -64,6 +67,13 @@ async def subscribe(
             glob_length = int.from_bytes(glob_length_bytes, "big")
             glob_bytes = await async_read_exact(body, glob_length)
             glob = glob_bytes.decode("utf-8")
+
+            recovery_url_length_bytes = await async_read_exact(body, 2)
+            recovery_url_length = int.from_bytes(recovery_url_length_bytes, "big")
+            recovery_url: Optional[str] = None
+            if recovery_url_length > 0:
+                recovery_url_bytes = await async_read_exact(body, recovery_url_length)
+                recovery_url = recovery_url_bytes.decode("utf-8")
         finally:
             await stream.aclose()
     except ValueError:
@@ -71,7 +81,11 @@ async def subscribe(
 
     auth_at = time.time()
     auth_result = await config.is_subscribe_glob_allowed(
-        url=url, glob=glob, now=auth_at, authorization=authorization
+        url=url,
+        recovery=recovery_url,
+        glob=glob,
+        now=auth_at,
+        authorization=authorization,
     )
 
     if auth_result == "unauthorized":
@@ -83,7 +97,7 @@ async def subscribe(
     elif auth_result != "ok":
         return Response(status_code=500)
 
-    db_result = await config.subscribe_glob(url=url, glob=glob)
+    db_result = await config.subscribe_glob(url=url, recovery=recovery_url, glob=glob)
 
     if db_result == "conflict":
         return Response(status_code=409)

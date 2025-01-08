@@ -67,7 +67,7 @@ async def unsubscribe_exact(
 
     auth_at = time.time()
     auth_result = await config.is_subscribe_glob_allowed(
-        url=url, glob=glob, now=auth_at, authorization=authorization
+        url=url, recovery=None, glob=glob, now=auth_at, authorization=authorization
     )
 
     if auth_result == "unauthorized":

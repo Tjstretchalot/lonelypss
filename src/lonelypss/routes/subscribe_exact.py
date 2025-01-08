@@ -31,6 +31,9 @@ async def subscribe_exact(
     - N bytes: the url. must be valid utf-8
     - 2 bytes (M): the length of the topic.
     - M bytes: the topic
+    - 2 bytes (R): either 0, to indicate no missed messages are desired, or the length
+      of the url to post missed messages to, big-endian, unsigned
+    - R bytes: the url to post missed messages to, utf-8 encoded
 
     NOTE: if you want to use the same path and topic for multiple subscriptions
     to get multiple notifications, you can include a hash that disambiguates them,
@@ -62,6 +65,13 @@ async def subscribe_exact(
             topic_length_bytes = await async_read_exact(body, 2)
             topic_length = int.from_bytes(topic_length_bytes, "big")
             topic = await async_read_exact(body, topic_length)
+
+            recovery_url_length_bytes = await async_read_exact(body, 2)
+            recovery_url_length = int.from_bytes(recovery_url_length_bytes, "big")
+            recovery_url: Optional[str] = None
+            if recovery_url_length > 0:
+                recovery_url_bytes = await async_read_exact(body, recovery_url_length)
+                recovery_url = recovery_url_bytes.decode("utf-8")
         finally:
             await stream.aclose()
     except ValueError:
@@ -69,7 +79,11 @@ async def subscribe_exact(
 
     auth_at = time.time()
     auth_result = await config.is_subscribe_exact_allowed(
-        url=url, exact=topic, now=auth_at, authorization=authorization
+        url=url,
+        recovery=recovery_url,
+        exact=topic,
+        now=auth_at,
+        authorization=authorization,
     )
 
     if auth_result == "unauthorized":
@@ -81,7 +95,9 @@ async def subscribe_exact(
     elif auth_result != "ok":
         return Response(status_code=500)
 
-    db_result = await config.subscribe_exact(url=url, exact=topic)
+    db_result = await config.subscribe_exact(
+        url=url, recovery=recovery_url, exact=topic
+    )
 
     if db_result == "conflict":
         return Response(status_code=409)

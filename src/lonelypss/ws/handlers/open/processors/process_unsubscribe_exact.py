@@ -26,7 +26,11 @@ async def process_unsubscribe_exact(
     url = make_for_receive_websocket_url_and_change_counter(state)
     auth_at = time.time()
     auth_result = await state.broadcaster_config.is_subscribe_exact_allowed(
-        url=url, exact=message.topic, now=auth_at, authorization=message.authorization
+        url=url,
+        recovery=None,
+        exact=message.topic,
+        now=auth_at,
+        authorization=message.authorization,
     )
     if auth_result != "ok":
         raise AuthRejectedException(f"unsubscribe exact: {auth_result}")

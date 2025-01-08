@@ -12,7 +12,12 @@ import aiohttp
 from fastapi import APIRouter, Header, Request, Response
 from pydantic import BaseModel, Field
 
-from lonelypss.config.config import Config
+from lonelypss.config.config import (
+    Config,
+    MissedInfo,
+    SubscriberInfo,
+    SubscriberInfoType,
+)
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.util.close_guarded_io import CloseGuardedIO
 from lonelypss.util.sync_io import SyncIOBaseLikeIO, read_exact
@@ -198,6 +203,33 @@ class TrustedNotifyResultUnavailable:
 TrustedNotifyResult = Union[TrustedNotifyResultOK, TrustedNotifyResultUnavailable]
 
 
+async def _handle_missed(
+    config: Config,
+    topic: bytes,
+    subscriber: SubscriberInfo,
+) -> None:
+    if subscriber.type == SubscriberInfoType.UNAVAILABLE:
+        return
+    if subscriber.recovery is None:
+        return
+
+    next_retry_at = await config.get_delay_for_next_missed_retry(
+        receive_url=subscriber.url,
+        missed_url=subscriber.recovery,
+        topic=topic,
+        attempts=0,
+    )
+    if next_retry_at is not None:
+        await config.upsert_missed(
+            info=MissedInfo(
+                topic=topic,
+                attempts=0,
+                next_retry_at=next_retry_at,
+                subscriber_info=subscriber,
+            )
+        )
+
+
 async def handle_trusted_notify(
     topic: bytes,
     data: SyncIOBaseLikeIO,
@@ -234,7 +266,7 @@ async def handle_trusted_notify(
     guarded_request_body = CloseGuardedIO(data)
 
     async for subscriber in config.get_subscribers(topic=topic):
-        if subscriber["type"] == "unavailable":
+        if subscriber.type == SubscriberInfoType.UNAVAILABLE:
             return TrustedNotifyResultUnavailable(
                 type=TrustedNotifyResultType.UNAVAILABLE,
                 partial_succeeded=succeeded,
@@ -242,9 +274,8 @@ async def handle_trusted_notify(
             )
 
         attempted += 1
-        url = subscriber["url"]
         my_authorization = await config.setup_authorization(
-            url=url, topic=topic, message_sha512=sha512, now=time.time()
+            url=subscriber.url, topic=topic, message_sha512=sha512, now=time.time()
         )
         if my_authorization is None:
             headers.pop("Authorization", None)
@@ -252,19 +283,24 @@ async def handle_trusted_notify(
             headers["Authorization"] = my_authorization
 
         data.seek(message_starts_at)
+        handled_missed = False
         try:
             async with session.post(
-                url,
+                subscriber.url,
                 data=guarded_request_body,
                 headers=headers,
             ) as resp:
                 if resp.ok:
-                    logging.debug(f"Successfully notified {url} about {topic!r}")
+                    logging.debug(
+                        f"Successfully notified {subscriber.url} about {topic!r}"
+                    )
                     succeeded += 1
                 else:
                     logging.warning(
-                        f"Failed to notify {url} about {topic!r}: {resp.status}"
+                        f"Failed to notify {subscriber.url} about {topic!r}: {resp.status}"
                     )
+                    handled_missed = True
+                    await _handle_missed(config, topic, subscriber)
 
                     if resp.status >= 400 and resp.status < 500:
                         content_type = resp.headers.get("Content-Type")
@@ -277,17 +313,24 @@ async def handle_trusted_notify(
                                 and content.get("unsubscribe") is True
                             ):
                                 logging.info(
-                                    f"Unsubscribing {url} from {topic!r} due to response: {json.dumps(content)}"
+                                    f"Unsubscribing {subscriber.url} from {topic!r} due to response: {json.dumps(content)}"
                                 )
 
-                                if subscriber["type"] == "exact":
-                                    await config.unsubscribe_exact(url=url, exact=topic)
+                                if subscriber.type == SubscriberInfoType.EXACT:
+                                    await config.unsubscribe_exact(
+                                        url=subscriber.url, exact=topic
+                                    )
                                 else:
                                     await config.unsubscribe_glob(
-                                        url=url, glob=subscriber["glob"]
+                                        url=subscriber.url, glob=subscriber.glob
                                     )
+
         except aiohttp.ClientError:
-            logging.error(f"Failed to notify {url} about {topic!r}", exc_info=True)
+            logging.error(
+                f"Failed to notify {subscriber.url} about {topic!r}", exc_info=True
+            )
+            if not handled_missed:
+                await _handle_missed(config, topic, subscriber)
 
     return TrustedNotifyResultOK(
         type=TrustedNotifyResultType.OK,

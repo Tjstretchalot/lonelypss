@@ -4,6 +4,9 @@ from lonelypss.ws.handlers.open.senders.protocol import Sender
 from lonelypss.ws.handlers.open.senders.send_internal_large_message import (
     send_internal_large_message,
 )
+from lonelypss.ws.handlers.open.senders.send_internal_missed_message import (
+    send_internal_missed_message,
+)
 from lonelypss.ws.handlers.open.senders.send_internal_small_message import (
     send_internal_small_message,
 )
@@ -16,6 +19,7 @@ from lonelypss.ws.handlers.open.senders.send_waiting_internal_spooled_large_mess
 from lonelypss.ws.state import (
     InternalLargeMessage,
     InternalMessageType,
+    InternalMissedMessage,
     InternalSmallMessage,
     SimplePendingSendPreFormatted,
     SimplePendingSendType,
@@ -26,6 +30,7 @@ from lonelypss.ws.state import (
 
 Sendable = Union[
     InternalSmallMessage,
+    InternalMissedMessage,
     InternalLargeMessage,
     WaitingInternalSpooledLargeMessage,
     SimplePendingSendPreFormatted,
@@ -33,6 +38,7 @@ Sendable = Union[
 
 SENDERS: Dict[Any, Any] = {
     InternalMessageType.SMALL: send_internal_small_message,
+    InternalMessageType.MISSED: send_internal_missed_message,
     InternalMessageType.LARGE: send_internal_large_message,
     WaitingInternalMessageType.SPOOLED_LARGE: send_waiting_internal_spooled_large_message,
     SimplePendingSendType.PRE_FORMATTED: send_simple_pending_send_pre_formatted,

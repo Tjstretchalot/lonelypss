@@ -1,5 +1,7 @@
 import asyncio
+import enum
 import importlib
+import random
 from typing import (
     TYPE_CHECKING,
     AsyncIterable,
@@ -10,10 +12,10 @@ from typing import (
     Protocol,
     Tuple,
     Type,
-    TypedDict,
     Union,
 )
 
+from lonelypsp.compat import fast_dataclass
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
 from lonelypss.config.auth_config import AuthConfig
@@ -25,24 +27,41 @@ except ImportError:
     ...
 
 
-class SubscriberInfoExact(TypedDict):
-    type: Literal["exact"]
+class SubscriberInfoType(enum.Enum):
+    EXACT = enum.auto()
+    GLOB = enum.auto()
+    UNAVAILABLE = enum.auto()
+
+
+@fast_dataclass
+class SubscriberInfoExact:
+    type: Literal[SubscriberInfoType.EXACT]
     """Indicates we found a subscriber on this exact topic"""
     url: str
     """The url to reach the subscriber"""
+    recovery: Optional[str]
+    """The recovery url to later tell the subscriber if we fail to
+    send them this message, if any
+    """
 
 
-class SubscriberInfoGlob(TypedDict):
-    type: Literal["glob"]
+@fast_dataclass
+class SubscriberInfoGlob:
+    type: Literal[SubscriberInfoType.GLOB]
     """Indicates we found a subscriber for this topic via a matching glob subscription"""
     glob: str
     """The glob that matched the topic"""
     url: str
     """The url to reach the subscriber"""
+    recovery: Optional[str]
+    """The recovery url to later tell the subscriber if we fail to
+    send them this message, if any
+    """
 
 
-class SubscriberInfoUnavailable(TypedDict):
-    type: Literal["unavailable"]
+@fast_dataclass
+class SubscriberInfoUnavailable:
+    type: Literal[SubscriberInfoType.UNAVAILABLE]
     """Indicates that the database for subscriptions is unavailable
     and the request should be aborted with a 503
     """
@@ -51,6 +70,68 @@ class SubscriberInfoUnavailable(TypedDict):
 SubscriberInfo = Union[
     SubscriberInfoExact, SubscriberInfoGlob, SubscriberInfoUnavailable
 ]
+
+
+@fast_dataclass
+class MissedInfo:
+    """information about a url we are trying to send a missed message to"""
+
+    topic: bytes
+    """the topic that the message was supposed to be sent to"""
+    attempts: int
+    """how many times we have tried to send this message"""
+    next_retry_at: float
+    """the next time we should try to send this message"""
+    subscriber_info: Union[SubscriberInfoExact, SubscriberInfoGlob]
+    """the subscriber that was supposed to receive the message; if deleted,
+    the missed row MUST also be deleted
+    """
+
+
+@fast_dataclass
+class MutableMissedInfo:
+    """just the actually changable parts of MissedInfo after an attempt"""
+
+    attempts: int
+    """how many times we have tried to send this message"""
+    next_retry_at: float
+    """the next time we should try to send this message"""
+
+
+class LockedMissedInfo(Protocol):
+    """Used in `get_overdue_missed_with_lock`; a MissedInfo item that is temporarily
+    prevented from being returned in concurrent calls to `get_overdue_missed_with_lock`
+    (both in other processes connected to the same database and in other
+    coroutines in the same async thread) until the lock time has expired
+    or `release` has been called.
+    """
+
+    @property
+    def info(self) -> MissedInfo:
+        """the potentially still protected MissedInfo"""
+
+    async def release(
+        self,
+        /,
+        *,
+        new_info: Optional[MutableMissedInfo] = None,
+    ) -> Literal["conflict", "unavailable", "ok"]:
+        """Releases the lock on this item and sets the new information or
+        deletes the record based on `new_info`. This should not raise an
+        exception if the lock has already expired or `release` has already
+        been called, instead, return `conflict`
+
+        Args:
+            new_info (Optional[MutableMissedInfo], None): the new information
+                to set, or None to delete the record
+
+        Returns:
+            `conflict`: if the record is no longer the same as it was so
+                this did nothing
+            `unavailable`: if the database for missed messages is unavailable
+            `ok`: the record was the same as it was and it was updated/deleted
+                as requested
+        """
 
 
 class DBConfig(Protocol):
@@ -66,17 +147,24 @@ class DBConfig(Protocol):
         """
 
     async def subscribe_exact(
-        self, /, *, url: str, exact: bytes
+        self, /, *, url: str, recovery: Optional[str], exact: bytes
     ) -> Literal["success", "conflict", "unavailable"]:
         """Subscribes the given URL to the given exact match.
 
         Args:
             url (str): the url that will receive notifications
+            recovery (str, None): if the subscriber wishes for a MISSED message
+                to be posted to a url when the broadcaster fails to send them a
+                message on this topic (later, with more spread out retries),
+                this is the url that will receive that message. If None, no
+                MISSED message will be sent. NOTE: missed messages do not
+                contain the actual message missed
             exact (bytes): the exact topic they want to receive messages from
 
         Returns:
             `success`: if the subscription was added
-            `conflict`: if the subscription already exists
+            `conflict`: if the subscription already exists. the recovery url MUST NOT
+                have been changed (if it differs)
             `unavailable`: if a service is required to check this isn't available
         """
 
@@ -96,17 +184,24 @@ class DBConfig(Protocol):
         """
 
     async def subscribe_glob(
-        self, /, *, url: str, glob: str
+        self, /, *, url: str, recovery: Optional[str], glob: str
     ) -> Literal["success", "conflict", "unavailable"]:
         """Subscribes the given URL to the given glob-style match
 
         Args:
             url (str): the url that will receive notifications
+            recovery (str, None): if the subscriber wishes for a MISSED message
+                to be posted to a url when the broadcaster fails to send them a
+                message on this glob (later, with more spread out retries), this
+                is the url that will receive that message. If None, no MISSED
+                message will be sent. NOTE: missed messages do not contain the
+                actual message missed
             glob (str): a glob for the topics that they want to receive notifications from
 
         Returns:
             `success`: if the subscription was added
-            `conflict`: if the subscription already exists
+            `conflict`: if the subscription already exists. the recovery url MUST NOT
+                have been changed (if it differs)
             `unavailable`: if the database for subscriptions is unavailable
         """
 
@@ -188,7 +283,41 @@ class DBConfig(Protocol):
         Yields:
             (SubscriberInfo): the subscriber that was found, or a special value indicating
                 that the database is unavailable.
-                Example: `{"type": "exact", "url": "http://example.com/v1/receive"}`
+        """
+
+    async def upsert_missed(
+        self, /, *, info: MissedInfo
+    ) -> Literal["success", "unavailable"]:
+        """Updates the given missed information, which should be looked up using
+        the subscriber information, with the new attempt/next attempt time. If
+        the subscriber is a GLOB subscriber, the topic should also be updated
+
+        Should clear any locks from `get_overdue_missed_with_lock` for the same
+        `info.subscriber_info.url` and `info.topic`
+
+        Args:
+            info (MissedInfo): the information about the missed message
+
+        Returns:
+            `success`: if the missed message was updated
+            `unavailable`: if the database for missed messages is unavailable
+        """
+
+    def get_overdue_missed_with_lock(
+        self, /, *, now: float
+    ) -> AsyncIterable[LockedMissedInfo]:
+        """Streams back the missed messages that are overdue for retrying. This
+        has important concurrency requirements: when this is called in parallel,
+        async or from different processes, it should not repeat messages until
+        the lock time is elapsed without `__aexit__` being called on the item.
+        The choice of lock time is implementation-defined, but should be at least
+        enough time to attempt contacting the subscriber and getting a response.
+
+        Args:
+            now (float): the current time in seconds since the epoch
+
+        Yields:
+            (LockedMissedInfo): the missed message that is overdue
         """
 
 
@@ -287,6 +416,15 @@ class GenericConfig(Protocol):
         one at a time, then set to true.
         """
 
+    @property
+    def sweep_missed_interval(self) -> float:
+        """The interval in seconds between sweeps of pending MISSED messages,
+        which are retried for a significant period of time (more than enough
+        to get past any transient network issues) so that subscribers can
+        trigger their reboot recovery mechanism if they did not detect that
+        they were not reachable
+        """
+
 
 class GenericConfigFromValues:
     """Convenience class that allows you to create a GenericConfig protocol
@@ -305,6 +443,7 @@ class GenericConfigFromValues:
         websocket_large_direct_send_timeout: Optional[float],
         websocket_send_max_unacknowledged: Optional[int],
         websocket_minimal_headers: bool,
+        sweep_missed_interval: float,
     ):
         self.message_body_spool_size = message_body_spool_size
         self.outgoing_http_timeout_total = outgoing_http_timeout_total
@@ -317,6 +456,89 @@ class GenericConfigFromValues:
         self.websocket_large_direct_send_timeout = websocket_large_direct_send_timeout
         self.websocket_send_max_unacknowledged = websocket_send_max_unacknowledged
         self.websocket_minimal_headers = websocket_minimal_headers
+        self.sweep_missed_interval = sweep_missed_interval
+
+
+class MissedRetryConfig(Protocol):
+    async def get_delay_for_next_missed_retry(
+        self, /, *, receive_url: str, missed_url: str, topic: bytes, attempts: int
+    ) -> Optional[float]:
+        """Determines the number of fractional seconds to wait before retrying
+        a missed message sent to a subscriber that failed to receive a message
+        on a topic.
+
+        Essentially, the flow on failure when a recovery url is specified is
+
+        ```
+        Broadcaster -> Subscriber: RECEIVE (error)
+        (get_delay_for_next_missed_retry(attempts=0) seconds pass)
+        Broadcaster -> Subscriber: MISSED (error)
+        (get_delay_for_next_missed_retry(attempts=1) seconds pass)
+        Broadcaster -> Subscriber: MISSED (error)
+        (get_delay_for_next_missed_retry(attempts=2) seconds pass)
+        ...
+        ```
+
+        May return None to never retry again.
+
+        Args:
+            receive_url (str): the url that was supposed to get the RECEIVE
+            missed_url (str): the url that gets the MISSED
+            topic (bytes): the topic the message was posted to
+            attempts (int): the number of attempts that have been made so far
+                to send the MISSED message
+
+        Returns:
+            None: no more retries
+            float: the minimum time in seconds to wait before retrying
+        """
+
+
+class MissedRetryStandard:
+    """Standard implementation of the MissedRetryConfig protocol
+
+    `expo_factor * (expo_base ** min(expo_max, attempts)) + constant + random() * jitter`
+    """
+
+    def __init__(
+        self,
+        expo_factor: float,
+        expo_base: float,
+        expo_max: int,
+        max_retries: int,
+        constant: float,
+        jitter: float,
+    ) -> None:
+        """
+        `expo_factor * (expo_base ** min(expo_max, attempts)) + constant + random() * jitter`
+
+        Args:
+            expo_factor (float): the factor to multiply the base by to get the
+                delay between retries
+            expo_base (float): the base delay between retries
+            expo_max (int): the maximum number of retries before we stop
+            max_retries (int): the maximum number of retries before we stop
+            constant (float): the constant delay to add to the exponential delay
+            jitter (float): the amount of jitter to add to the delay
+        """
+        self.expo_factor = expo_factor
+        self.expo_base = expo_base
+        self.expo_max = expo_max
+        self.max_retries = max_retries
+        self.constant = constant
+        self.jitter = jitter
+
+    async def get_delay_for_next_missed_retry(
+        self, /, *, receive_url: str, missed_url: str, topic: bytes, attempts: int
+    ) -> Optional[float]:
+        if attempts >= self.max_retries:
+            return None
+
+        return (
+            self.expo_factor * (self.expo_base ** min(self.expo_max, attempts))
+            + self.constant
+            + random.random() * self.jitter
+        )
 
 
 class CompressionConfig(Protocol):
@@ -552,7 +774,9 @@ class CompressionConfigFromParts:
         return (zdict, 10)
 
 
-class Config(AuthConfig, DBConfig, GenericConfig, CompressionConfig, Protocol):
+class Config(
+    AuthConfig, DBConfig, GenericConfig, MissedRetryConfig, CompressionConfig, Protocol
+):
     """The injected behavior required for the lonelypss to operate. This is
     generally generated for you using one of the templates, see the readme for details
     """
@@ -566,11 +790,13 @@ class ConfigFromParts:
         auth: AuthConfig,
         db: DBConfig,
         generic: GenericConfig,
+        missed: MissedRetryConfig,
         compression: CompressionConfig,
     ):
         self.auth = auth
         self.db = db
         self.generic = generic
+        self.missed = missed
         self.compression = compression
 
     async def setup_incoming_auth(self) -> None:
@@ -592,17 +818,35 @@ class ConfigFromParts:
         await self.db.teardown_db()
 
     async def is_subscribe_exact_allowed(
-        self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        exact: bytes,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.auth.is_subscribe_exact_allowed(
-            url=url, exact=exact, now=now, authorization=authorization
+            url=url,
+            recovery=recovery,
+            exact=exact,
+            now=now,
+            authorization=authorization,
         )
 
     async def is_subscribe_glob_allowed(
-        self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        glob: str,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.auth.is_subscribe_glob_allowed(
-            url=url, glob=glob, now=now, authorization=authorization
+            url=url, recovery=recovery, glob=glob, now=now, authorization=authorization
         )
 
     async def is_notify_allowed(
@@ -619,6 +863,19 @@ class ConfigFromParts:
             message_sha512=message_sha512,
             now=now,
             authorization=authorization,
+        )
+
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_missed_allowed(
+            recovery=recovery, topic=topic, now=now, authorization=authorization
         )
 
     async def is_receive_allowed(
@@ -671,10 +928,15 @@ class ConfigFromParts:
             url=url, topic=topic, message_sha512=message_sha512, now=now
         )
 
+    async def setup_missed(
+        self, /, *, recovery: str, topic: bytes, now: float
+    ) -> Optional[str]:
+        return await self.auth.setup_missed(recovery=recovery, topic=topic, now=now)
+
     async def subscribe_exact(
-        self, /, *, url: str, exact: bytes
+        self, /, *, url: str, recovery: Optional[str], exact: bytes
     ) -> Literal["success", "conflict", "unavailable"]:
-        return await self.db.subscribe_exact(url=url, exact=exact)
+        return await self.db.subscribe_exact(url=url, recovery=recovery, exact=exact)
 
     async def unsubscribe_exact(
         self, /, *, url: str, exact: bytes
@@ -682,9 +944,9 @@ class ConfigFromParts:
         return await self.db.unsubscribe_exact(url=url, exact=exact)
 
     async def subscribe_glob(
-        self, /, *, url: str, glob: str
+        self, /, *, url: str, recovery: Optional[str], glob: str
     ) -> Literal["success", "conflict", "unavailable"]:
-        return await self.db.subscribe_glob(url=url, glob=glob)
+        return await self.db.subscribe_glob(url=url, recovery=recovery, glob=glob)
 
     async def unsubscribe_glob(
         self, /, *, url: str, glob: str
@@ -708,6 +970,16 @@ class ConfigFromParts:
         return await self.db.set_subscriptions(
             url=url, strong_etag=strong_etag, subscriptions=subscriptions
         )
+
+    async def upsert_missed(
+        self, /, *, info: MissedInfo
+    ) -> Literal["success", "unavailable"]:
+        return await self.db.upsert_missed(info=info)
+
+    def get_overdue_missed_with_lock(
+        self, /, *, now: float
+    ) -> AsyncIterable[LockedMissedInfo]:
+        return self.db.get_overdue_missed_with_lock(now=now)
 
     @property
     def message_body_spool_size(self) -> int:
@@ -748,6 +1020,16 @@ class ConfigFromParts:
     @property
     def websocket_send_max_unacknowledged(self) -> Optional[int]:
         return self.generic.websocket_send_max_unacknowledged
+
+    async def get_delay_for_next_missed_retry(
+        self, /, *, receive_url: str, missed_url: str, topic: bytes, attempts: int
+    ) -> Optional[float]:
+        return await self.missed.get_delay_for_next_missed_retry(
+            receive_url=receive_url,
+            missed_url=missed_url,
+            topic=topic,
+            attempts=attempts,
+        )
 
     @property
     def compression_allowed(self) -> bool:
@@ -804,8 +1086,13 @@ class ConfigFromParts:
     def websocket_minimal_headers(self) -> bool:
         return self.generic.websocket_minimal_headers
 
+    @property
+    def sweep_missed_interval(self) -> float:
+        return self.generic.sweep_missed_interval
+
 
 if TYPE_CHECKING:
-    __: Type[GenericConfig] = GenericConfigFromValues
-    ___: Type[CompressionConfig] = CompressionConfigFromParts
-    ____: Type[Config] = ConfigFromParts
+    _a: Type[GenericConfig] = GenericConfigFromValues
+    _b: Type[CompressionConfig] = CompressionConfigFromParts
+    _c: Type[MissedRetryConfig] = MissedRetryStandard
+    _d: Type[Config] = ConfigFromParts

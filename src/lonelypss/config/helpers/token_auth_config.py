@@ -50,12 +50,26 @@ class IncomingTokenAuth:
         return self._check_header(self.broadcaster_expecting, authorization)
 
     async def is_subscribe_exact_allowed(
-        self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        exact: bytes,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return self._check_subscriber_header(authorization)
 
     async def is_subscribe_glob_allowed(
-        self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        glob: str,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return self._check_subscriber_header(authorization)
 
@@ -77,6 +91,17 @@ class IncomingTokenAuth:
         url: str,
         topic: bytes,
         message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return self._check_broadcaster_header(authorization)
+
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
         now: float,
         authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -115,6 +140,11 @@ class OutgoingTokenAuth:
 
     async def setup_authorization(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
+    ) -> Optional[str]:
+        return self.authorization
+
+    async def setup_missed(
+        self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
         return self.authorization
 

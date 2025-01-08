@@ -109,6 +109,11 @@ class InternalMessageType(Enum):
     in memory.
     """
 
+    MISSED = auto()
+    """A message which indicates this broadcaster may have missed a message
+    from another broadcaster on a relevant topic
+    """
+
 
 @dataclass
 class InternalSmallMessage:
@@ -158,7 +163,22 @@ class InternalLargeMessage:
     """a trusted sha512 hash of the message body"""
 
 
-InternalMessage = Union[InternalSmallMessage, InternalLargeMessage]
+@dataclass
+class InternalMissedMessage:
+    """A message from the receiver that indicates this broadcaster may have missed
+    a message from another broadcaster on a relevant topic
+    """
+
+    type: Literal[InternalMessageType.MISSED]
+    """discriminator value"""
+
+    topic: bytes
+    """the topic the message was sent to"""
+
+
+InternalMessage = Union[
+    InternalSmallMessage, InternalLargeMessage, InternalMissedMessage
+]
 
 
 class WaitingInternalMessageType(Enum):
@@ -206,7 +226,9 @@ class WaitingInternalSpooledLargeMessage:
     """a trusted sha512 hash of the message body"""
 
 
-WaitingInternalMessage = Union[InternalSmallMessage, WaitingInternalSpooledLargeMessage]
+WaitingInternalMessage = Union[
+    InternalSmallMessage, InternalMissedMessage, WaitingInternalSpooledLargeMessage
+]
 
 
 class SimplePendingSendType(Enum):

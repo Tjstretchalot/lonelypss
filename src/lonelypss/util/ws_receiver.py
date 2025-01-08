@@ -86,6 +86,16 @@ class BaseWSReceiver(Protocol):
         are immutable)
         """
 
+    async def on_missed(
+        self,
+        /,
+        *,
+        topic: bytes,
+    ) -> None:
+        """Handles that this receiver may have missed some messages on the
+        given topic
+        """
+
 
 class FanoutWSReceiver(BaseWSReceiver, Protocol):
     """Deduplicates messages and forwards onto the receivers. Note that because
@@ -104,6 +114,10 @@ class FanoutWSReceiver(BaseWSReceiver, Protocol):
     @property
     def receiver_url(self) -> str:
         """The URL that this receiver expects to receive messages from"""
+
+    @property
+    def missed_url(self) -> Optional[str]:
+        """The URL that this receiver expects to receive missed messages from"""
 
     async def register_receiver(self, receiver: BaseWSReceiver) -> int:
         """Registers a receiver to receive messages from this fanout receiver.
@@ -166,11 +180,18 @@ class SimpleFanoutWSReceiver:
     in that case
     """
 
-    def __init__(self, receiver_url: str, db: DBConfig) -> None:
+    def __init__(
+        self, receiver_url: str, recovery: Optional[str], db: DBConfig
+    ) -> None:
         self.receiver_url = receiver_url
         """the url we can and expect to receive messages on, i.e, how the
         other broadcasters can reach this broadcaster. Typically,
         `http://<broadcaster_ip>:<broadcaster_port>/v1/receive_for_websockets`
+        """
+        self.recovery = recovery
+        """the url we can and expect to receive missed messages on, i.e, how the
+        other broadcasters tell this broadcaster they previously failed to reach
+        them; None to indicate we are not requesting MISSED messages
         """
         self.receivers_head: Optional[ReceiverNode] = None
         """the receivers are stored as a double-linked list with a dict
@@ -211,6 +232,10 @@ class SimpleFanoutWSReceiver:
         self._lock: asyncio.Lock = asyncio.Lock()
         """the lock guarding mutations to receivers, exact_subscriptions, and glob_subscriptions"""
 
+    @property
+    def missed_url(self) -> Optional[str]:
+        return self.recovery
+
     async def __aenter__(self) -> "SimpleFanoutWSReceiver":
         async with self._lock:
             assert not self.entered, "already entered and not reentrant safe"
@@ -222,7 +247,7 @@ class SimpleFanoutWSReceiver:
                 for topic in self.exact_subscriptions:
                     try_unsubscribes.append(topic)
                     result = await self.db.subscribe_exact(
-                        url=self.receiver_url, exact=topic
+                        url=self.receiver_url, recovery=self.recovery, exact=topic
                     )
                     if result != "success" and result != "conflict":
                         raise ValueError(f"failed to subscribe to {topic!r}: {result}")
@@ -230,7 +255,7 @@ class SimpleFanoutWSReceiver:
                 for glob in self.glob_subscriptions.keys():
                     try_globs.append(glob)
                     result = await self.db.subscribe_glob(
-                        url=self.receiver_url, glob=glob
+                        url=self.receiver_url, recovery=self.recovery, glob=glob
                     )
                     if result != "success" and result != "conflict":
                         raise ValueError(f"failed to subscribe to {glob}: {result}")
@@ -402,7 +427,7 @@ class SimpleFanoutWSReceiver:
 
             try:
                 result = await self.db.subscribe_exact(
-                    url=self.receiver_url, exact=topic
+                    url=self.receiver_url, recovery=self.recovery, exact=topic
                 )
                 if result != "success" and result != "conflict":
                     raise ValueError(f"failed to subscribe to {topic!r}: {result}")
@@ -451,7 +476,9 @@ class SimpleFanoutWSReceiver:
                 return
 
             try:
-                result = await self.db.subscribe_glob(url=self.receiver_url, glob=glob)
+                result = await self.db.subscribe_glob(
+                    url=self.receiver_url, recovery=self.recovery, glob=glob
+                )
                 if result != "success" and result != "conflict":
                     raise ValueError(f"failed to subscribe to {glob!r}: {result}")
             except BaseException:
@@ -579,6 +606,17 @@ class SimpleFanoutWSReceiver:
             if not receiver.is_relevant(topic):
                 continue
             await receiver.on_small_incoming(data, topic=topic, sha512=sha512)
+
+    async def on_missed(
+        self,
+        /,
+        *,
+        topic: bytes,
+    ) -> None:
+        for receiver in self.iter_receivers():
+            if not receiver.is_relevant(topic):
+                continue
+            await receiver.on_missed(topic=topic)
 
 
 if TYPE_CHECKING:

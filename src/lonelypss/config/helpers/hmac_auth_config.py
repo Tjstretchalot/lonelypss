@@ -290,7 +290,14 @@ class IncomingHmacAuth:
         return await self._check_token(self.broadcaster_secret, to_sign, hmac_token)
 
     async def is_subscribe_exact_allowed(
-        self, /, *, url: str, exact: bytes, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        exact: bytes,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         token = self._get_token(authorization, now)
         if token[0] != "found":
@@ -298,6 +305,7 @@ class IncomingHmacAuth:
 
         timestamp, nonce, hmac_token = token[1]
         encoded_url = url.encode("utf-8")
+        encoded_recovery = b"" if recovery is None else recovery.encode("utf-8")
         encoded_timestamp = timestamp.to_bytes(8, "big")
         encoded_nonce = nonce.encode("utf-8")
 
@@ -308,6 +316,8 @@ class IncomingHmacAuth:
                 encoded_nonce,
                 len(encoded_url).to_bytes(2, "big"),
                 encoded_url,
+                len(encoded_recovery).to_bytes(2, "big"),
+                encoded_recovery,
                 len(exact).to_bytes(2, "big"),
                 exact,
             ]
@@ -315,7 +325,14 @@ class IncomingHmacAuth:
         return await self._check_subscriber_token(to_sign, hmac_token)
 
     async def is_subscribe_glob_allowed(
-        self, /, *, url: str, glob: str, now: float, authorization: Optional[str]
+        self,
+        /,
+        *,
+        url: str,
+        recovery: Optional[str],
+        glob: str,
+        now: float,
+        authorization: Optional[str],
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         result = self._get_token(authorization, now)
         if result[0] != "found":
@@ -323,6 +340,7 @@ class IncomingHmacAuth:
 
         timestamp, nonce, hmac_token = result[1]
         encoded_url = url.encode("utf-8")
+        encoded_recovery = b"" if recovery is None else recovery.encode("utf-8")
         encoded_timestamp = timestamp.to_bytes(8, "big")
         encoded_glob = glob.encode("utf-8")
         encoded_nonce = nonce.encode("utf-8")
@@ -334,6 +352,8 @@ class IncomingHmacAuth:
                 encoded_nonce,
                 len(encoded_url).to_bytes(2, "big"),
                 encoded_url,
+                len(encoded_recovery).to_bytes(2, "big"),
+                encoded_recovery,
                 len(encoded_glob).to_bytes(2, "big"),
                 encoded_glob,
             ]
@@ -399,6 +419,37 @@ class IncomingHmacAuth:
                 len(topic).to_bytes(2, "big"),
                 topic,
                 message_sha512,
+            ]
+        )
+        return await self._check_broadcaster_token(to_sign, hmac_token)
+
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        result = self._get_token(authorization, now)
+        if result[0] != "found":
+            return result[0]
+
+        timestamp, nonce, hmac_token = result[1]
+        encoded_recovery = recovery.encode("utf-8")
+        encoded_timestamp = timestamp.to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(encoded_recovery).to_bytes(2, "big"),
+                encoded_recovery,
+                len(topic).to_bytes(2, "big"),
+                topic,
             ]
         )
         return await self._check_broadcaster_token(to_sign, hmac_token)
@@ -505,6 +556,27 @@ class OutgoingHmacAuth:
                 len(topic).to_bytes(2, "big"),
                 topic,
                 message_sha512,
+            ]
+        )
+        return self._sign(to_sign, nonce, now)
+
+    async def setup_missed(
+        self, /, *, recovery: str, topic: bytes, now: float
+    ) -> Optional[str]:
+        nonce = self._make_nonce()
+        encoded_recovery = recovery.encode("utf-8")
+        encoded_timestamp = int(now).to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(encoded_recovery).to_bytes(2, "big"),
+                encoded_recovery,
+                len(topic).to_bytes(2, "big"),
+                topic,
             ]
         )
         return self._sign(to_sign, nonce, now)

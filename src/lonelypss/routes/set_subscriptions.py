@@ -19,7 +19,9 @@ from typing import (
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response
 from lonelypsp.stateless.make_strong_etag import (
+    GlobAndRecovery,
     StrongEtag,
+    TopicAndRecovery,
     create_strong_etag_generator,
 )
 
@@ -50,9 +52,9 @@ class _SubscriptionInfoFromStreamTopicsIter:
     def __aiter__(self) -> "_SubscriptionInfoFromStreamTopicsIter":
         return self
 
-    async def __anext__(self) -> bytes:
+    async def __anext__(self) -> TopicAndRecovery:
         assert self.parent.state == _SubscriptionInfoFromStreamState.TOPICS, "destroyed"
-        return cast(bytes, await self.parent.__anext__())
+        return cast(TopicAndRecovery, await self.parent.__anext__())
 
 
 class _SubscriptionInfoFromStreamGlobsIter:
@@ -65,12 +67,12 @@ class _SubscriptionInfoFromStreamGlobsIter:
     def __aiter__(self) -> "_SubscriptionInfoFromStreamGlobsIter":
         return self
 
-    async def __anext__(self) -> str:
+    async def __anext__(self) -> GlobAndRecovery:
         assert (
             self.parent.state == _SubscriptionInfoFromStreamState.GLOBS_NOT_PEEKED
             or self.parent.state == _SubscriptionInfoFromStreamState.GLOBS
         ), "destroyed"
-        return cast(str, await self.parent.__anext__())
+        return cast(GlobAndRecovery, await self.parent.__anext__())
 
 
 class _SubscriptionInfoFromSyncStream:
@@ -106,7 +108,7 @@ class _SubscriptionInfoFromSyncStream:
         assert self.state != _SubscriptionInfoFromStreamState.NOT_ENTERED, "not entered"
         self.state = _SubscriptionInfoFromStreamState.CLOSED
 
-    async def __anext__(self) -> Union[str, bytes]:
+    async def __anext__(self) -> Union[GlobAndRecovery, TopicAndRecovery]:
         if self.state == _SubscriptionInfoFromStreamState.TOPICS:
             if self.remaining <= 0:
                 raise StopAsyncIteration
@@ -115,12 +117,22 @@ class _SubscriptionInfoFromSyncStream:
                 topic_length_bytes = read_exact(self.stream, 2)
                 topic_length = int.from_bytes(topic_length_bytes, "big")
                 topic = read_exact(self.stream, topic_length)
+                recovery_length_bytes = read_exact(self.stream, 2)
+                recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                recovery_bytes = (
+                    None
+                    if recovery_length == 0
+                    else read_exact(self.stream, recovery_length)
+                )
+                recovery_str = (
+                    None if recovery_bytes is None else recovery_bytes.decode("utf-8")
+                )
                 self.remaining -= 1
             except BaseException:
                 self.state = _SubscriptionInfoFromStreamState.CLOSED
                 raise
 
-            return topic
+            return TopicAndRecovery(topic, recovery_str)
 
         if self.state == _SubscriptionInfoFromStreamState.GLOBS_NOT_PEEKED:
             try:
@@ -128,6 +140,10 @@ class _SubscriptionInfoFromSyncStream:
                     topic_length_bytes = read_exact(self.stream, 2)
                     topic_length = int.from_bytes(topic_length_bytes, "big")
                     read_exact(self.stream, topic_length)
+                    recovery_length_bytes = read_exact(self.stream, 2)
+                    recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                    if recovery_length > 0:
+                        read_exact(self.stream, recovery_length)
                     self.remaining -= 1
                     if self.remaining % 10 == 0:
                         await asyncio.sleep(0)
@@ -149,23 +165,33 @@ class _SubscriptionInfoFromSyncStream:
                 glob_length = int.from_bytes(glob_length_bytes, "big")
                 glob_bytes = read_exact(self.stream, glob_length)
                 glob = glob_bytes.decode("utf-8")
+                recovery_length_bytes = read_exact(self.stream, 2)
+                recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                recovery_bytes = (
+                    None
+                    if recovery_length == 0
+                    else read_exact(self.stream, recovery_length)
+                )
+                recovery_str = (
+                    None if recovery_bytes is None else recovery_bytes.decode("utf-8")
+                )
                 self.remaining -= 1
             except BaseException:
                 self.state = _SubscriptionInfoFromStreamState.CLOSED
                 raise
 
-            return glob
+            return GlobAndRecovery(glob, recovery_str)
 
         raise AssertionError("not topics or globs")
 
     def __aiter__(self) -> "_SubscriptionInfoFromSyncStream":
         return self
 
-    def topics(self) -> AsyncIterator[bytes]:
+    def topics(self) -> AsyncIterator[TopicAndRecovery]:
         assert self.state == _SubscriptionInfoFromStreamState.TOPICS, "not topics"
         return _SubscriptionInfoFromStreamTopicsIter(self)
 
-    def globs(self) -> AsyncIterator[str]:
+    def globs(self) -> AsyncIterator[GlobAndRecovery]:
         if self.state == _SubscriptionInfoFromStreamState.TOPICS:
             self.state = _SubscriptionInfoFromStreamState.GLOBS_NOT_PEEKED
 
@@ -211,7 +237,7 @@ class _SubscriptionInfoFromAsyncStream:
         assert self.state != _SubscriptionInfoFromStreamState.NOT_ENTERED, "not entered"
         self.state = _SubscriptionInfoFromStreamState.CLOSED
 
-    async def __anext__(self) -> Union[str, bytes]:
+    async def __anext__(self) -> Union[GlobAndRecovery, TopicAndRecovery]:
         if self.state == _SubscriptionInfoFromStreamState.TOPICS:
             if self.remaining <= 0:
                 raise StopAsyncIteration
@@ -220,12 +246,22 @@ class _SubscriptionInfoFromAsyncStream:
                 topic_length_bytes = await async_read_exact(self.stream, 2)
                 topic_length = int.from_bytes(topic_length_bytes, "big")
                 topic = await async_read_exact(self.stream, topic_length)
+                recovery_length_bytes = await async_read_exact(self.stream, 2)
+                recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                recovery_bytes = (
+                    None
+                    if recovery_length == 0
+                    else await async_read_exact(self.stream, recovery_length)
+                )
+                recovery_str = (
+                    None if recovery_bytes is None else recovery_bytes.decode("utf-8")
+                )
                 self.remaining -= 1
             except BaseException:
                 self.state = _SubscriptionInfoFromStreamState.CLOSED
                 raise
 
-            return topic
+            return TopicAndRecovery(topic, recovery_str)
 
         if self.state == _SubscriptionInfoFromStreamState.GLOBS_NOT_PEEKED:
             try:
@@ -233,6 +269,10 @@ class _SubscriptionInfoFromAsyncStream:
                     topic_length_bytes = await async_read_exact(self.stream, 2)
                     topic_length = int.from_bytes(topic_length_bytes, "big")
                     await async_read_exact(self.stream, topic_length)
+                    recovery_length_bytes = await async_read_exact(self.stream, 2)
+                    recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                    if recovery_length > 0:
+                        await async_read_exact(self.stream, recovery_length)
                     self.remaining -= 1
 
                 num_globs_bytes = await async_read_exact(self.stream, 4)
@@ -252,23 +292,33 @@ class _SubscriptionInfoFromAsyncStream:
                 glob_length = int.from_bytes(glob_length_bytes, "big")
                 glob_bytes = await async_read_exact(self.stream, glob_length)
                 glob = glob_bytes.decode("utf-8")
+                recovery_length_bytes = await async_read_exact(self.stream, 2)
+                recovery_length = int.from_bytes(recovery_length_bytes, "big")
+                recovery_bytes = (
+                    None
+                    if recovery_length == 0
+                    else await async_read_exact(self.stream, recovery_length)
+                )
+                recovery_str = (
+                    None if recovery_bytes is None else recovery_bytes.decode("utf-8")
+                )
                 self.remaining -= 1
             except BaseException:
                 self.state = _SubscriptionInfoFromStreamState.CLOSED
                 raise
 
-            return glob
+            return GlobAndRecovery(glob, recovery_str)
 
         raise AssertionError("not topics or globs")
 
     def __aiter__(self) -> "_SubscriptionInfoFromAsyncStream":
         return self
 
-    def topics(self) -> AsyncIterator[bytes]:
+    def topics(self) -> AsyncIterator[TopicAndRecovery]:
         assert self.state == _SubscriptionInfoFromStreamState.TOPICS, "not topics"
         return _SubscriptionInfoFromStreamTopicsIter(self)
 
-    def globs(self) -> AsyncIterator[str]:
+    def globs(self) -> AsyncIterator[GlobAndRecovery]:
         if self.state == _SubscriptionInfoFromStreamState.TOPICS:
             self.state = _SubscriptionInfoFromStreamState.GLOBS_NOT_PEEKED
 
@@ -295,9 +345,11 @@ class _CopyPassthroughStream:
 if TYPE_CHECKING:
     _a: Type[SetSubscriptionsInfo] = _SubscriptionInfoFromSyncStream
     _b: Type[SetSubscriptionsInfo] = _SubscriptionInfoFromAsyncStream
-    _c: Type[AsyncIterator[Union[str, bytes]]] = _SubscriptionInfoFromSyncStream
-    _d: Type[AsyncIterator[bytes]] = _SubscriptionInfoFromStreamTopicsIter
-    _e: Type[AsyncIterator[str]] = _SubscriptionInfoFromStreamGlobsIter
+    _c: Type[AsyncIterator[Union[GlobAndRecovery, TopicAndRecovery]]] = (
+        _SubscriptionInfoFromSyncStream
+    )
+    _d: Type[AsyncIterator[TopicAndRecovery]] = _SubscriptionInfoFromStreamTopicsIter
+    _e: Type[AsyncIterator[GlobAndRecovery]] = _SubscriptionInfoFromStreamGlobsIter
     _f: Type[AsyncReadableBytesIO] = _CopyPassthroughStream
 
 

@@ -224,12 +224,14 @@ from typing import AsyncIterator
 
 {import_config}
 from fastapi import FastAPI
+from lonelypss.bknd.sweep_missed import sweep_missed
 from lonelypss.config.auth_config import AuthConfigFromParts
 from lonelypss.config.config import (
     CompressionConfigFromParts,
     Config,
     ConfigFromParts,
     GenericConfigFromValues,
+    MissedRetryStandard,
 )
 from lonelypss.config.lifespan import setup_config, teardown_config
 from lonelypss.middleware.config import ConfigMiddleware
@@ -258,6 +260,15 @@ def _make_config() -> Config:{load_auth_secrets}
             websocket_large_direct_send_timeout=0.3,
             websocket_send_max_unacknowledged=3,
             websocket_minimal_headers=True,
+            sweep_missed_interval=10,
+        ),
+        missed=MissedRetryStandard(
+            expo_factor=1,
+            expo_base=2,
+            expo_max=10,
+            max_retries=20,
+            constant=1,
+            jitter=2,
         ),
         compression=CompressionConfigFromParts(
             compression_allowed=True,
@@ -276,7 +287,9 @@ def _make_config() -> Config:{load_auth_secrets}
 
 config = _make_config()
 fanout = SimpleFanoutWSReceiver(
-    receiver_url="http://127.0.0.1:3003/v1/receive_for_websockets", db=config
+    receiver_url="http://127.0.0.1:3003/v1/receive_for_websockets",
+    recovery="http://127.0.0.1:3003/v1/missed_for_websockets",
+    db=config,
 )
 
 
@@ -284,7 +297,7 @@ fanout = SimpleFanoutWSReceiver(
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await setup_config(config)
     try:
-        async with fanout:
+        async with fanout, sweep_missed(config):
             yield
     finally:
         await teardown_config(config)

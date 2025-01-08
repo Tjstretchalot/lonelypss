@@ -1,12 +1,14 @@
 import asyncio
 import re
-from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type, Union
+from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type
 
 from lonelypss.util.sync_io import SyncReadableBytesIO
 from lonelypss.ws.state import (
     AsyncioWSReceiver,
     InternalLargeMessage,
+    InternalMessage,
     InternalMessageType,
+    InternalMissedMessage,
     InternalSmallMessage,
 )
 
@@ -17,9 +19,7 @@ class SimpleReceiver:
         self.glob_subscriptions: List[Tuple[re.Pattern, str]] = []
         self.receiver_id: Optional[int] = None
 
-        self.queue: asyncio.Queue[Union[InternalLargeMessage, InternalSmallMessage]] = (
-            asyncio.Queue()
-        )
+        self.queue: asyncio.Queue[InternalMessage] = asyncio.Queue()
 
     def is_relevant(self, topic: bytes) -> bool:
         if topic in self.exact_subscriptions:
@@ -66,6 +66,11 @@ class SimpleReceiver:
             InternalSmallMessage(
                 type=InternalMessageType.SMALL, topic=topic, data=data, sha512=sha512
             )
+        )
+
+    async def on_missed(self, /, *, topic: bytes) -> None:
+        await self.queue.put(
+            InternalMissedMessage(type=InternalMessageType.MISSED, topic=topic)
         )
 
 
