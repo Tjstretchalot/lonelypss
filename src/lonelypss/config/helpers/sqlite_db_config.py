@@ -42,7 +42,7 @@ import sys
 
 if sys.version_info < (3, 10):
     from enum import Enum, auto
-    from typing import TypeVar, overload
+    from typing import Any, TypeVar, overload
 
     class _NotSet(Enum):
         NOT_SET = auto()
@@ -51,20 +51,22 @@ if sys.version_info < (3, 10):
     D = TypeVar("D")
 
     @overload
-    async def anext(iterable: AsyncIterable[T]) -> T: ...
+    async def anext(iterable: AsyncIterator[T], /) -> T: ...
 
     @overload
-    async def anext(iterable: AsyncIterable[T], default: D, /) -> Union[T, D]: ...
+    async def anext(iterable: AsyncIterator[T], default: D, /) -> Union[T, D]: ...
 
     async def anext(
-        iterable: AsyncIterable[T], default: Optional[D] = _NotSet.NOT_SET, /
-    ) -> Union[T, D]:
+        iterable: AsyncIterator[T],
+        default: Any = None,
+        /,
+    ) -> Any:
         try:
             return await iterable.__anext__()
         except StopAsyncIteration:
             if default is _NotSet.NOT_SET:
                 raise
-            return cast(D, default)
+            return default
 
 
 class SqliteLockedMissedInfo:
