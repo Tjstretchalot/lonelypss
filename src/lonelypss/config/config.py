@@ -15,11 +15,12 @@ from typing import (
     Union,
 )
 
+from lonelypsp.auth.config import AuthConfig
 from lonelypsp.compat import fast_dataclass
 from lonelypsp.stateful.messages.configure import S2B_Configure
+from lonelypsp.stateful.messages.confirm_configure import B2S_ConfirmConfigure
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
-from lonelypss.config.auth_config import AuthConfig
 from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 try:
@@ -818,6 +819,13 @@ class ConfigFromParts:
     async def teardown_db(self) -> None:
         await self.db.teardown_db()
 
+    async def authorize_subscribe_exact(
+        self, /, *, url: str, recovery: Optional[str], exact: bytes, now: float
+    ) -> Optional[str]:
+        return await self.auth.authorize_subscribe_exact(
+            url=url, recovery=recovery, exact=exact, now=now
+        )
+
     async def is_subscribe_exact_allowed(
         self,
         /,
@@ -836,6 +844,13 @@ class ConfigFromParts:
             authorization=authorization,
         )
 
+    async def authorize_subscribe_glob(
+        self, /, *, url: str, recovery: Optional[str], glob: str, now: float
+    ) -> Optional[str]:
+        return await self.auth.authorize_subscribe_glob(
+            url=url, recovery=recovery, glob=glob, now=now
+        )
+
     async def is_subscribe_glob_allowed(
         self,
         /,
@@ -848,6 +863,13 @@ class ConfigFromParts:
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.auth.is_subscribe_glob_allowed(
             url=url, recovery=recovery, glob=glob, now=now, authorization=authorization
+        )
+
+    async def authorize_notify(
+        self, /, *, topic: bytes, message_sha512: bytes, now: float
+    ) -> Optional[str]:
+        return await self.auth.authorize_notify(
+            topic=topic, message_sha512=message_sha512, now=now
         )
 
     async def is_notify_allowed(
@@ -866,47 +888,44 @@ class ConfigFromParts:
             authorization=authorization,
         )
 
-    async def is_missed_allowed(
+    async def authorize_stateful_configure(
         self,
         /,
         *,
-        recovery: str,
-        topic: bytes,
-        now: float,
-        authorization: Optional[str],
-    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return await self.auth.is_missed_allowed(
-            recovery=recovery, topic=topic, now=now, authorization=authorization
+        subscriber_nonce: bytes,
+        enable_zstd: bool,
+        enable_training: bool,
+        initial_dict: int,
+    ) -> Optional[str]:
+        return await self.auth.authorize_stateful_configure(
+            subscriber_nonce=subscriber_nonce,
+            enable_zstd=enable_zstd,
+            enable_training=enable_training,
+            initial_dict=initial_dict,
         )
 
-    async def is_websocket_configure_allowed(
+    async def is_stateful_configure_allowed(
         self, /, *, message: S2B_Configure, now: float
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return await self.auth.is_websocket_configure_allowed(message=message, now=now)
+        return await self.auth.is_stateful_configure_allowed(message=message, now=now)
 
-    async def is_receive_allowed(
-        self,
-        /,
-        *,
-        url: str,
-        topic: bytes,
-        message_sha512: bytes,
-        now: float,
-        authorization: Optional[str],
-    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return await self.auth.is_receive_allowed(
-            url=url,
-            topic=topic,
-            message_sha512=message_sha512,
-            now=now,
-            authorization=authorization,
-        )
+    async def authorize_check_subscriptions(
+        self, /, *, url: str, now: float
+    ) -> Optional[str]:
+        return await self.auth.authorize_check_subscriptions(url=url, now=now)
 
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return await self.auth.is_check_subscriptions_allowed(
             url=url, now=now, authorization=authorization
+        )
+
+    async def authorize_set_subscriptions(
+        self, /, *, url: str, strong_etag: StrongEtag, now: float
+    ) -> Optional[str]:
+        return await self.auth.authorize_set_subscriptions(
+            url=url, strong_etag=strong_etag, now=now
         )
 
     async def is_set_subscriptions_allowed(
@@ -934,16 +953,54 @@ class ConfigFromParts:
             url=url, topic=topic, message_sha512=message_sha512, now=now
         )
 
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_receive_allowed(
+            url=url,
+            topic=topic,
+            message_sha512=message_sha512,
+            now=now,
+            authorization=authorization,
+        )
+
     async def authorize_missed(
         self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
         return await self.auth.authorize_missed(recovery=recovery, topic=topic, now=now)
 
-    async def authorize_websocket_confirm_configure(
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_missed_allowed(
+            recovery=recovery, topic=topic, now=now, authorization=authorization
+        )
+
+    async def authorize_stateful_confirm_configure(
         self, /, *, broadcaster_nonce: bytes, now: float
     ) -> Optional[str]:
-        return await self.auth.authorize_websocket_confirm_configure(
+        return await self.auth.authorize_stateful_confirm_configure(
             broadcaster_nonce=broadcaster_nonce, now=now
+        )
+
+    async def is_stateful_confirm_configure_allowed(
+        self, /, *, message: B2S_ConfirmConfigure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_stateful_confirm_configure_allowed(
+            message=message, now=now
         )
 
     async def subscribe_exact(

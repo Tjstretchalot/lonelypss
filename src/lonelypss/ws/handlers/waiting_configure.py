@@ -97,7 +97,7 @@ async def handle_waiting_configure(state: State) -> State:
         return StateClosing(type=StateType.CLOSING, websocket=state.websocket)
 
     message = S2B_ConfigureParser.parse(prefix.flags, prefix.type, raw_message_reader)
-    auth_result = await state.broadcaster_config.is_websocket_configure_allowed(
+    auth_result = await state.broadcaster_config.is_stateful_configure_allowed(
         message=message, now=time.time()
     )
     if auth_result != "ok":
@@ -108,7 +108,7 @@ async def handle_waiting_configure(state: State) -> State:
     try:
         broadcaster_nonce = secrets.token_bytes(32)
         authorization = (
-            await state.broadcaster_config.authorize_websocket_confirm_configure(
+            await state.broadcaster_config.authorize_stateful_confirm_configure(
                 broadcaster_nonce=broadcaster_nonce, now=time.time()
             )
         )
