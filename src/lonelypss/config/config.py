@@ -800,17 +800,17 @@ class ConfigFromParts:
         self.missed = missed
         self.compression = compression
 
-    async def setup_incoming_auth(self) -> None:
-        await self.auth.setup_incoming_auth()
+    async def setup_to_broadcaster_auth(self) -> None:
+        await self.auth.setup_to_broadcaster_auth()
 
-    async def teardown_incoming_auth(self) -> None:
-        await self.auth.teardown_incoming_auth()
+    async def teardown_to_broadcaster_auth(self) -> None:
+        await self.auth.teardown_to_broadcaster_auth()
 
-    async def setup_outgoing_auth(self) -> None:
-        await self.auth.setup_outgoing_auth()
+    async def setup_to_subscriber_auth(self) -> None:
+        await self.auth.setup_to_subscriber_auth()
 
-    async def teardown_outgoing_auth(self) -> None:
-        await self.auth.teardown_outgoing_auth()
+    async def teardown_to_subscriber_auth(self) -> None:
+        await self.auth.teardown_to_subscriber_auth()
 
     async def setup_db(self) -> None:
         await self.db.setup_db()
@@ -927,22 +927,22 @@ class ConfigFromParts:
             authorization=authorization,
         )
 
-    async def setup_authorization(
+    async def authorize_receive(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
     ) -> Optional[str]:
-        return await self.auth.setup_authorization(
+        return await self.auth.authorize_receive(
             url=url, topic=topic, message_sha512=message_sha512, now=now
         )
 
-    async def setup_missed(
+    async def authorize_missed(
         self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
-        return await self.auth.setup_missed(recovery=recovery, topic=topic, now=now)
+        return await self.auth.authorize_missed(recovery=recovery, topic=topic, now=now)
 
-    async def setup_websocket_confirm_configure(
+    async def authorize_websocket_confirm_configure(
         self, /, *, broadcaster_nonce: bytes, now: float
     ) -> Optional[str]:
-        return await self.auth.setup_websocket_confirm_configure(
+        return await self.auth.authorize_websocket_confirm_configure(
             broadcaster_nonce=broadcaster_nonce, now=now
         )
 

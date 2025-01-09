@@ -38,7 +38,7 @@ async def sweep_missed_once(config: Config) -> None:
                 continue
 
             try:
-                authorization = await config.setup_missed(
+                authorization = await config.authorize_missed(
                     recovery=msg.info.subscriber_info.recovery,
                     topic=msg.info.topic,
                     now=time.time(),

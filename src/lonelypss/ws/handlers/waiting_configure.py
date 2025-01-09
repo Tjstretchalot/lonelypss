@@ -108,7 +108,7 @@ async def handle_waiting_configure(state: State) -> State:
     try:
         broadcaster_nonce = secrets.token_bytes(32)
         authorization = (
-            await state.broadcaster_config.setup_websocket_confirm_configure(
+            await state.broadcaster_config.authorize_websocket_confirm_configure(
                 broadcaster_nonce=broadcaster_nonce, now=time.time()
             )
         )

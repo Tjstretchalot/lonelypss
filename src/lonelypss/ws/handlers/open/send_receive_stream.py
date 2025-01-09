@@ -117,7 +117,7 @@ async def send_uncompressed_receive_stream(
             reading from the stream and released right after reading the stream, which
             can be used to "promote" the read to async
     """
-    authorization = await state.broadcaster_config.setup_authorization(
+    authorization = await state.broadcaster_config.authorize_receive(
         url=make_for_send_websocket_url_and_change_counter(state),
         topic=topic,
         message_sha512=sha512,
@@ -231,7 +231,7 @@ async def send_compressed_receive_stream(
         headers = serialize_b2s_receive_stream(
             B2S_ReceiveStreamStartCompressed(
                 type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
-                authorization=await state.broadcaster_config.setup_authorization(
+                authorization=await state.broadcaster_config.authorize_receive(
                     url=make_for_send_websocket_url_and_change_counter(state),
                     topic=topic,
                     message_sha512=compressed_sha512,
@@ -334,7 +334,7 @@ async def send_receive_stream_given_first_headers(
                 return
 
             part_id += 1
-            authorization = await state.broadcaster_config.setup_authorization(
+            authorization = await state.broadcaster_config.authorize_receive(
                 url=make_for_send_websocket_url_and_change_counter(state),
                 topic=topic,
                 message_sha512=sha512,

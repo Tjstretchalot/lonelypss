@@ -20,24 +20,24 @@ def main() -> None:
         help="Which backing database to use",
     )
     parser.add_argument(
-        "--incoming-auth",
+        "--to-broadcasters-auth",
         default="hmac",
         choices=["hmac", "token", "none"],
-        help="How to verify incoming requests to subscribe or unsubscribe from endpoints",
+        help="How to verify requests to the broadcaster",
     )
     parser.add_argument(
-        "--incoming-auth-token",
-        help="If specified, the secret to use for incoming auth. Ignored unless the incoming auth strategy requires a secret (hmac, token)",
+        "--to-broadcasters-secret",
+        help="If specified, the secret to use for requests to broadcasters. Ignored unless the to-broadcaster auth strategy requires a secret (hmac, token)",
     )
     parser.add_argument(
-        "--outgoing-auth",
+        "--to-subscribers-auth",
         default="hmac",
         choices=["hmac", "token", "none"],
-        help="How to verify outgoing requests notifying subscribers",
+        help="How to verify requests to subscribers",
     )
     parser.add_argument(
-        "--outgoing-auth-token",
-        help="If specified, the secret to use for outgoing auth. Ignored unless the outgoing auth strategy requires a secret (hmac, token)",
+        "--to-subscribers-secret",
+        help="If specified, the secret to use for requests to subscribers. Ignored unless the to-subscriber auth strategy requires a secret (hmac, token)",
     )
     args = parser.parse_args()
     if not args.setup:
@@ -45,33 +45,33 @@ def main() -> None:
 
     setup_locally(
         db=args.db,
-        incoming_auth=args.incoming_auth,
-        incoming_auth_token=args.incoming_auth_token,
-        outgoing_auth=args.outgoing_auth,
-        outgoing_auth_token=args.outgoing_auth_token,
+        to_broadcasters_auth=args.to_broadcasters_auth,
+        to_broadcasters_secret=args.to_broadcasters_secret,
+        to_subscribers_auth=args.to_subscribers_auth,
+        to_subscribers_secret=args.to_subscribers_secret,
     )
 
 
 def setup_locally(
     *,
     db: Literal["sqlite", "rqlite"],
-    incoming_auth: Literal["hmac", "token", "none"],
-    incoming_auth_token: Optional[str],
-    outgoing_auth: Literal["hmac", "token", "none"],
-    outgoing_auth_token: Optional[str],
+    to_broadcasters_auth: Literal["hmac", "token", "none"],
+    to_broadcasters_secret: Optional[str],
+    to_subscribers_auth: Literal["hmac", "token", "none"],
+    to_subscribers_secret: Optional[str],
 ) -> None:
     print(
         "httppubserver - Setup\n"
         f"  - db: {db}\n"
-        f"  - incoming-auth: {incoming_auth}\n"
-        f"  - incoming-auth-token: {'not specified' if incoming_auth_token is None else 'specified'}\n"
-        f"  - outgoing-auth: {outgoing_auth}\n"
-        f"  - outgoing-auth-token: {'not specified' if outgoing_auth_token is None else 'specified'}"
+        f"  - to-broadcasters-auth: {to_broadcasters_auth}\n"
+        f"  - to-broadcasters-secret: {'not specified' if to_broadcasters_secret is None else 'specified'}\n"
+        f"  - to-subscribers-auth: {to_subscribers_auth}\n"
+        f"  - to-subscribers-secret: {'not specified' if to_subscribers_secret is None else 'specified'}"
     )
 
     print("Prechecking...")
     for file in [
-        "broadcast-secrets.json",
+        "broadcaster-secrets.json",
         "subscriber-secrets.json",
         "main.py",
         "requirements.txt",
@@ -80,69 +80,50 @@ def setup_locally(
             raise Exception(f"{file} already exists, refusing to overwrite")
 
     print("Storing secrets...")
-    if incoming_auth_token is None:
-        incoming_auth_token = secrets.token_urlsafe(64)
+    if to_broadcasters_secret is None:
+        to_broadcasters_secret = secrets.token_urlsafe(64)
 
-    if outgoing_auth_token is None:
-        outgoing_auth_token = secrets.token_urlsafe(64)
+    if to_subscribers_secret is None:
+        to_subscribers_secret = secrets.token_urlsafe(64)
 
     auth_for_requests_to_broadcasters = (
         {
-            "type": incoming_auth,
-            "secret": incoming_auth_token,
+            "type": to_broadcasters_auth,
+            "secret": to_broadcasters_secret,
         }
-        if incoming_auth != "none"
+        if to_broadcasters_auth != "none"
         else None
     )
     auth_for_requests_to_subscribers = (
         {
-            "type": outgoing_auth,
-            "secret": outgoing_auth_token,
+            "type": to_subscribers_auth,
+            "secret": to_subscribers_secret,
         }
-        if outgoing_auth != "none"
+        if to_subscribers_auth != "none"
         else None
     )
 
-    with open("broadcaster-secrets.json", "w") as f:
-        f.write(
-            json.dumps(
-                {
-                    "version": "1",
-                    **(
-                        {"incoming": auth_for_requests_to_broadcasters}
-                        if auth_for_requests_to_broadcasters is not None
-                        else {}
-                    ),
-                    **(
-                        {"outgoing": (auth_for_requests_to_subscribers)}
-                        if auth_for_requests_to_subscribers is not None
-                        else {}
-                    ),
-                },
-                indent=2,
+    for target in ["broadcaster", "subscriber"]:
+        with open(f"{target}-secrets.json", "w") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "version": "2",
+                        **(
+                            {"to-broadcaster": auth_for_requests_to_broadcasters}
+                            if auth_for_requests_to_broadcasters is not None
+                            else {}
+                        ),
+                        **(
+                            {"to-subscriber": (auth_for_requests_to_subscribers)}
+                            if auth_for_requests_to_subscribers is not None
+                            else {}
+                        ),
+                    },
+                    indent=2,
+                )
+                + "\n"
             )
-            + "\n"
-        )
-    with open("subscriber-secrets.json", "w") as f:
-        f.write(
-            json.dumps(
-                {
-                    "version": "1",
-                    **(
-                        {"outgoing": auth_for_requests_to_broadcasters}
-                        if auth_for_requests_to_broadcasters is not None
-                        else {}
-                    ),
-                    **(
-                        {"incoming": (auth_for_requests_to_subscribers)}
-                        if auth_for_requests_to_subscribers is not None
-                        else {}
-                    ),
-                },
-                indent=2,
-            )
-            + "\n"
-        )
 
     print("Building entrypoint...")
 
@@ -153,49 +134,59 @@ def setup_locally(
     else:
         db_code = "TODO()"
 
-    need_secrets = False
-    if incoming_auth == "token":
-        incoming_auth_code = (
-            "IncomingTokenAuth(\n"
-            '        subscriber_token=auth_secrets["incoming"]["secret"],\n'
-            '        broadcaster_token=auth_secrets["outgoing"]["secret"],\n'
-            "    )"
-        )
-        need_secrets = True
-    elif incoming_auth == "hmac":
-        hmac_db = "TODO()"
-        if db == "sqlite":
-            hmac_db = (
-                "incoming_auth_config.IncomingHmacAuthSqliteDBConfig(\n"
-                '            "recent-hmac-tokens.db"\n'
-                "        )"
-            )
-        incoming_auth_code = (
-            "IncomingHmacAuth(\n"
-            '        subscriber_secret=auth_secrets["incoming"]["secret"],\n'
-            '        broadcaster_secret=auth_secrets["outgoing"]["secret"],\n'
-            f"        db_config={hmac_db},\n"
-            "    )"
-        )
-        need_secrets = True
-    elif incoming_auth == "none":
-        incoming_auth_code = "IncomingNoneAuth()"
-    else:
-        incoming_auth_code = "TODO()"
+    auth_setup_code = ""
 
-    if outgoing_auth == "token":
-        outgoing_auth_code = (
-            'OutgoingTokenAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
+    need_secrets = False
+    if to_broadcasters_auth == "token":
+        to_broadcaster_auth_code = (
+            "ToBroadcasterTokenAuth(\n"
+            '        token=auth_secrets["to-broadcaster"]["secret"],\n'
+            "    )"
         )
         need_secrets = True
-    elif outgoing_auth == "hmac":
-        outgoing_auth_code = (
-            'OutgoingHmacAuth(\n        auth_secrets["outgoing"]["secret"]\n    )'
+    elif to_broadcasters_auth == "hmac":
+        if db == "sqlite":
+            auth_setup_code = (
+                "hmac_db: incoming_auth_config.IncomingHmacAuthDBConfig = (\n"
+                '        incoming_auth_config.IncomingHmacAuthSqliteDBConfig("recent-hmacs.db")\n'
+                "    )"
+            )
+        to_broadcaster_auth_code = (
+            "ToBroadcasterHmacAuth(\n"
+            '        secret=auth_secrets["to-broadcaster"]["secret"],\n'
+            "        db_config=hmac_db,\n"
+            "    )"
         )
-    elif outgoing_auth == "none":
-        outgoing_auth_code = "OutgoingNoneAuth()"
+        need_secrets = True
+    elif to_broadcasters_auth == "none":
+        to_broadcaster_auth_code = "ToBroadcasterNoneAuth()"
     else:
-        outgoing_auth_code = "TODO()"
+        to_broadcaster_auth_code = "TODO()"
+
+    if to_subscribers_auth == "token":
+        to_subscriber_auth_code = 'ToSubscriberTokenAuth(\n        auth_secrets["to-subscriber"]["secret"]\n    )'
+        need_secrets = True
+    elif to_subscribers_auth == "hmac":
+        if db == "sqlite":
+            if to_broadcasters_auth != "hmac":
+                auth_setup_code = (
+                    "hmac_db = incoming_auth_config.IncomingHmacAuthSqliteDBConfig(\n"
+                    '        "recent-hmacs.db"\n'
+                    "    )"
+                )
+            else:
+                auth_setup_code += f"\n    hmac_db = incoming_auth_config.IncomingHmacAuthDBReentrantConfig(hmac_db)"
+
+        to_subscriber_auth_code = (
+            "ToSubscriberHmacAuth(\n"
+            '        secret=auth_secrets["to-subscriber"]["secret"],\n'
+            "        db_config=hmac_db,\n"
+            "    )"
+        )
+    elif to_subscribers_auth == "none":
+        to_subscriber_auth_code = "ToSubscriberNoneAuth()"
+    else:
+        to_subscriber_auth_code = "TODO()"
 
     load_auth_secrets = (
         ""
@@ -211,11 +202,14 @@ def setup_locally(
         sorted(
             [
                 f"import lonelypss.config.helpers.{db}_db_config as db_config",
-                f"import lonelypss.config.helpers.{incoming_auth}_auth_config as incoming_auth_config",
-                f"import lonelypss.config.helpers.{outgoing_auth}_auth_config as outgoing_auth_config",
+                f"import lonelypss.config.helpers.{to_broadcasters_auth}_auth_config as incoming_auth_config",
+                f"import lonelypss.config.helpers.{to_subscribers_auth}_auth_config as outgoing_auth_config",
             ]
         )
     )
+
+    if auth_setup_code:
+        auth_setup_code = f"\n    {auth_setup_code}"
 
     with open("main.py", "w") as f:
         f.write(
@@ -241,12 +235,14 @@ from lonelypss.util.ws_receiver import SimpleFanoutWSReceiver
 
 
 def _make_config() -> Config:{load_auth_secrets}
-    db = db_config.{db_code}
-    incoming_auth = incoming_auth_config.{incoming_auth_code}
-    outgoing_auth = outgoing_auth_config.{outgoing_auth_code}
+    db = db_config.{db_code}{auth_setup_code}
+    to_broadcaster_auth = incoming_auth_config.{to_broadcaster_auth_code}
+    to_subscriber_auth = outgoing_auth_config.{to_subscriber_auth_code}
 
     return ConfigFromParts(
-        auth=AuthConfigFromParts(incoming=incoming_auth, outgoing=outgoing_auth),
+        auth=AuthConfigFromParts(
+            to_broadcaster=to_broadcaster_auth, to_subscriber=to_subscriber_auth
+        ),
         db=db,
         generic=GenericConfigFromValues(
             message_body_spool_size=1024 * 1024 * 10,

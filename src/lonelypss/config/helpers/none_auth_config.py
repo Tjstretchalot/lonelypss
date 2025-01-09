@@ -7,21 +7,21 @@ from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 
 if TYPE_CHECKING:
     from lonelypss.config.auth_config import (
-        IncomingAuthConfig,
-        OutgoingAuthConfig,
+        ToBroadcasterAuthConfig,
+        ToSubscriberAuthConfig,
     )
 
 
-class IncomingNoneAuth:
-    """Allows all incoming requests
+class ToBroadcasterNoneAuth:
+    """Sets up and allows a broadcaster that does not block any incoming requests.
 
     In order for this to be secure it must only be possible for trusted clients
     to connect to the server (e.g., by setting up TLS mutual auth at the binding
     level)
     """
 
-    async def setup_incoming_auth(self) -> None: ...
-    async def teardown_incoming_auth(self) -> None: ...
+    async def setup_to_broadcaster_auth(self) -> None: ...
+    async def teardown_to_broadcaster_auth(self) -> None: ...
 
     async def is_subscribe_exact_allowed(
         self,
@@ -58,29 +58,6 @@ class IncomingNoneAuth:
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return "ok"
 
-    async def is_receive_allowed(
-        self,
-        /,
-        *,
-        url: str,
-        topic: bytes,
-        message_sha512: bytes,
-        now: float,
-        authorization: Optional[str],
-    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return "ok"
-
-    async def is_missed_allowed(
-        self,
-        /,
-        *,
-        recovery: str,
-        topic: bytes,
-        now: float,
-        authorization: Optional[str],
-    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
-        return "ok"
-
     async def is_websocket_configure_allowed(
         self, /, *, message: S2B_Configure, now: float
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -104,30 +81,55 @@ class IncomingNoneAuth:
         return "ok"
 
 
-class OutgoingNoneAuth:
-    """Doesn't set any authorization header. In order for this to be secure, the
-    subscribers must only be able to receive messages from trusted clients.
+class ToSubscriberNoneAuth:
+    """Sets up and allows a subscriber that does not block any incoming requests.
+
+    In order for this to be secure, the subscribers must only be able to receive
+    messages from trusted clients.
     """
 
-    async def setup_outgoing_auth(self) -> None: ...
-    async def teardown_outgoing_auth(self) -> None: ...
+    async def setup_to_subscriber_auth(self) -> None: ...
+    async def teardown_to_subscriber_auth(self) -> None: ...
 
-    async def setup_authorization(
+    async def authorize_receive(
         self, /, *, url: str, topic: bytes, message_sha512: bytes, now: float
     ) -> Optional[str]:
         return None
 
-    async def setup_missed(
+    async def is_receive_allowed(
+        self,
+        /,
+        *,
+        url: str,
+        topic: bytes,
+        message_sha512: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return "ok"
+
+    async def is_missed_allowed(
+        self,
+        /,
+        *,
+        recovery: str,
+        topic: bytes,
+        now: float,
+        authorization: Optional[str],
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return "ok"
+
+    async def authorize_missed(
         self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
         return None
 
-    async def setup_websocket_confirm_configure(
+    async def authorize_websocket_confirm_configure(
         self, /, *, broadcaster_nonce: bytes, now: float
     ) -> Optional[str]:
         return None
 
 
 if TYPE_CHECKING:
-    _: Type[IncomingAuthConfig] = IncomingNoneAuth
-    __: Type[OutgoingAuthConfig] = OutgoingNoneAuth
+    _: Type[ToBroadcasterAuthConfig] = ToBroadcasterNoneAuth
+    __: Type[ToSubscriberAuthConfig] = ToSubscriberNoneAuth

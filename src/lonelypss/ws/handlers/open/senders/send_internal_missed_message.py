@@ -23,7 +23,7 @@ async def send_internal_missed_message(
     the subscriber is connected to Alice, and Bob received a message but
     could not tell Alice about it.
     """
-    authorization = await state.broadcaster_config.setup_missed(
+    authorization = await state.broadcaster_config.authorize_missed(
         recovery=make_for_send_websocket_url_and_change_counter(state),
         topic=message.topic,
         now=time.time(),

@@ -95,7 +95,7 @@ source venv/bin/activate
 python -m pip install -U pip
 pip install lonelypss[standard]
 
-lonelypss --setup --db sqlite --incoming-auth hmac --outgoing-auth hmac
+lonelypss --setup --db sqlite --to-broadcasters-auth hmac --to-subscribers-auth hmac
 pip install -r requirements.txt
 pip freeze > requirements.txt
 

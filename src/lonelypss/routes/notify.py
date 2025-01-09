@@ -274,7 +274,7 @@ async def handle_trusted_notify(
             )
 
         attempted += 1
-        my_authorization = await config.setup_authorization(
+        my_authorization = await config.authorize_receive(
             url=subscriber.url, topic=topic, message_sha512=sha512, now=time.time()
         )
         if my_authorization is None:
