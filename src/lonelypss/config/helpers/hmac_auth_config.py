@@ -7,6 +7,7 @@ import sqlite3
 import time
 from typing import TYPE_CHECKING, Literal, Optional, Protocol, Tuple, Type, Union, cast
 
+from lonelypsp.stateful.messages.configure import S2B_Configure
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
 from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
@@ -454,6 +455,31 @@ class IncomingHmacAuth:
         )
         return await self._check_broadcaster_token(to_sign, hmac_token)
 
+    async def is_websocket_configure_allowed(
+        self, /, *, message: S2B_Configure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        result = self._get_token(message.authorization, now)
+        if result[0] != "found":
+            return result[0]
+
+        timestamp, nonce, hmac_token = result[1]
+        encoded_timestamp = timestamp.to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(message.subscriber_nonce).to_bytes(1, "big"),
+                message.subscriber_nonce,
+                b"\1" if message.enable_zstd else b"\0",
+                b"\1" if message.enable_training else b"\0",
+                message.initial_dict.to_bytes(2, "big"),
+            ]
+        )
+        return await self._check_subscriber_token(to_sign, hmac_token)
+
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -577,6 +603,24 @@ class OutgoingHmacAuth:
                 encoded_recovery,
                 len(topic).to_bytes(2, "big"),
                 topic,
+            ]
+        )
+        return self._sign(to_sign, nonce, now)
+
+    async def setup_websocket_confirm_configure(
+        self, /, *, broadcaster_nonce: bytes, now: float
+    ) -> Optional[str]:
+        nonce = self._make_nonce()
+        encoded_timestamp = int(now).to_bytes(8, "big")
+        encoded_nonce = nonce.encode("utf-8")
+
+        to_sign = b"".join(
+            [
+                encoded_timestamp,
+                len(encoded_nonce).to_bytes(1, "big"),
+                encoded_nonce,
+                len(broadcaster_nonce).to_bytes(1, "big"),
+                broadcaster_nonce,
             ]
         )
         return self._sign(to_sign, nonce, now)

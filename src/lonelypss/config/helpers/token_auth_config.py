@@ -1,6 +1,7 @@
 import hmac
 from typing import TYPE_CHECKING, Literal, Optional, Type
 
+from lonelypsp.stateful.messages.configure import S2B_Configure
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
 from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
@@ -107,6 +108,11 @@ class IncomingTokenAuth:
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
         return self._check_broadcaster_header(authorization)
 
+    async def is_websocket_configure_allowed(
+        self, /, *, message: S2B_Configure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return self._check_subscriber_header(message.authorization)
+
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -145,6 +151,11 @@ class OutgoingTokenAuth:
 
     async def setup_missed(
         self, /, *, recovery: str, topic: bytes, now: float
+    ) -> Optional[str]:
+        return self.authorization
+
+    async def setup_websocket_confirm_configure(
+        self, /, *, broadcaster_nonce: bytes, now: float
     ) -> Optional[str]:
         return self.authorization
 

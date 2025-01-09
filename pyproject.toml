@@ -1,6 +1,6 @@
 [project]
 name = "lonelypss"
-version = "0.0.1"
+version = "0.0.2"
 description = "PubSub over HTTP"
 readme = "README.md"
 authors = [
@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115",
     "aiohttp>=3.11",
-    "lonelypsp>=0.0.22"
+    "lonelypsp>=0.0.23"
 ]
 requires-python = ">=3.9"
 

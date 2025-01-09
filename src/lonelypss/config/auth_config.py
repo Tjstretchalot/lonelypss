@@ -6,6 +6,7 @@ from typing import (
     Type,
 )
 
+from lonelypsp.stateful.messages.configure import S2B_Configure
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
 from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
@@ -167,6 +168,24 @@ class IncomingAuthConfig(Protocol):
             `unavailable`: if a service is required to check this isn't available
         """
 
+    async def is_websocket_configure_allowed(
+        self, /, *, message: S2B_Configure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        """Determines if the subscriber who opened a websocket connection
+        to the broadcaster and sent the given configure message should be
+        allowed to continue.
+
+        Args:
+            message (S2B_Configure): the configure message they sent
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+
+        Returns:
+            `ok`: if the configure message is allowed
+            `unauthorized`: if the authorization header is required but not provided
+            `forbidden`: if the authorization header is provided but invalid
+            `unavailable`: if a service is required to check this isn't available
+        """
+
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -291,6 +310,22 @@ class OutgoingAuthConfig(Protocol):
             str, None: the authorization header to use, if any
         """
 
+    async def setup_websocket_confirm_configure(
+        self, /, *, broadcaster_nonce: bytes, now: float
+    ) -> Optional[str]:
+        """Sets up the authorization header that the broadcaster should use to
+        confirm that the subscriber is allowed to continue with the websocket
+        they opened.
+
+        Args:
+            broadcaster_nonce (bytes): the nonce that the broadcaster will send in the
+                confirm configure message
+            now (float): the current time in seconds since the epoch, as if from `time.time()`
+
+        Returns:
+            str, None: the authorization header to use, if any
+        """
+
 
 class AuthConfig(IncomingAuthConfig, OutgoingAuthConfig, Protocol): ...
 
@@ -395,6 +430,13 @@ class AuthConfigFromParts:
             recovery=recovery, topic=topic, now=now, authorization=authorization
         )
 
+    async def is_websocket_configure_allowed(
+        self, /, *, message: S2B_Configure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.incoming.is_websocket_configure_allowed(
+            message=message, now=now
+        )
+
     async def is_check_subscriptions_allowed(
         self, /, *, url: str, now: float, authorization: Optional[str]
     ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
@@ -431,6 +473,13 @@ class AuthConfigFromParts:
         self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
         return await self.outgoing.setup_missed(recovery=recovery, topic=topic, now=now)
+
+    async def setup_websocket_confirm_configure(
+        self, /, *, broadcaster_nonce: bytes, now: float
+    ) -> Optional[str]:
+        return await self.outgoing.setup_websocket_confirm_configure(
+            broadcaster_nonce=broadcaster_nonce, now=now
+        )
 
 
 if TYPE_CHECKING:

@@ -4,6 +4,7 @@ import hashlib
 import io
 import secrets
 import tempfile
+import time
 from collections import deque
 from typing import TYPE_CHECKING, List, cast
 
@@ -96,10 +97,21 @@ async def handle_waiting_configure(state: State) -> State:
         return StateClosing(type=StateType.CLOSING, websocket=state.websocket)
 
     message = S2B_ConfigureParser.parse(prefix.flags, prefix.type, raw_message_reader)
+    auth_result = await state.broadcaster_config.is_websocket_configure_allowed(
+        message=message, now=time.time()
+    )
+    if auth_result != "ok":
+        return StateClosing(type=StateType.CLOSING, websocket=state.websocket)
+
     receiver = SimpleReceiver()
     receiver_id = await state.internal_receiver.register_receiver(receiver)
     try:
         broadcaster_nonce = secrets.token_bytes(32)
+        authorization = (
+            await state.broadcaster_config.setup_websocket_confirm_configure(
+                broadcaster_nonce=broadcaster_nonce, now=time.time()
+            )
+        )
         connection_nonce = hashlib.sha256(
             message.subscriber_nonce + broadcaster_nonce
         ).digest()
@@ -167,6 +179,7 @@ async def handle_waiting_configure(state: State) -> State:
                         B2S_ConfirmConfigure(
                             type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_CONFIGURE,
                             broadcaster_nonce=broadcaster_nonce,
+                            authorization=authorization,
                         ),
                         minimal_headers=state.broadcaster_config.websocket_minimal_headers,
                     )

@@ -16,6 +16,7 @@ from typing import (
 )
 
 from lonelypsp.compat import fast_dataclass
+from lonelypsp.stateful.messages.configure import S2B_Configure
 from lonelypsp.stateless.make_strong_etag import StrongEtag
 
 from lonelypss.config.auth_config import AuthConfig
@@ -878,6 +879,11 @@ class ConfigFromParts:
             recovery=recovery, topic=topic, now=now, authorization=authorization
         )
 
+    async def is_websocket_configure_allowed(
+        self, /, *, message: S2B_Configure, now: float
+    ) -> Literal["ok", "unauthorized", "forbidden", "unavailable"]:
+        return await self.auth.is_websocket_configure_allowed(message=message, now=now)
+
     async def is_receive_allowed(
         self,
         /,
@@ -932,6 +938,13 @@ class ConfigFromParts:
         self, /, *, recovery: str, topic: bytes, now: float
     ) -> Optional[str]:
         return await self.auth.setup_missed(recovery=recovery, topic=topic, now=now)
+
+    async def setup_websocket_confirm_configure(
+        self, /, *, broadcaster_nonce: bytes, now: float
+    ) -> Optional[str]:
+        return await self.auth.setup_websocket_confirm_configure(
+            broadcaster_nonce=broadcaster_nonce, now=now
+        )
 
     async def subscribe_exact(
         self, /, *, url: str, recovery: Optional[str], exact: bytes
