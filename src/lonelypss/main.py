@@ -175,7 +175,7 @@ def setup_locally(
                     "    )"
                 )
             else:
-                auth_setup_code += f"\n    hmac_db = incoming_auth_config.IncomingHmacAuthDBReentrantConfig(hmac_db)"
+                auth_setup_code += "\n    hmac_db = incoming_auth_config.IncomingHmacAuthDBReentrantConfig(hmac_db)"
 
         to_subscriber_auth_code = (
             "ToSubscriberHmacAuth(\n"
