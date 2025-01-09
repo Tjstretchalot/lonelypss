@@ -1,10 +1,11 @@
 # lonelypss
 
-## PROJECT STAGE - PLANNING
+## PROJECT STAGE - PRE-ALPHA
 
-This project is in the development stage 1 - planning. This means that most things
-you see won't work yet and are in the process of being finalized. Star/watch this
-repository to be notified when it reaches the next stage!
+This project is in the development stage 2 - pre-alpha. This means that
+the project is still in the early stages of development, and is not yet
+stable. The current primary focus of the library is building the test
+suite in `lonelypst`
 
 ## Overview
 
