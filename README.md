@@ -10,7 +10,7 @@ suite in `lonelypst`
 ## Overview
 
 This library is for when you need best-effort pub/sub behavior across the
-network, but don't want to maintain open connections with all your clients
+network, but don't want to maintain open connections with all your subscribers
 (i.e., you want some lonely clients), don't want polling, don't want message
 buffering, and might want very large (>4gb) messages. For example, when
 subscribing to restart/upgrade requests within CI/CD, or for eagerly filling or
@@ -23,18 +23,19 @@ and sends messages via webhooks (HTTP POST) requests to subscribers. It's
 agnostic to whether it's hosted within your network or across the internet, and
 can use http or https.
 
-When you know increased volume is expected for a particular client, you can
+When you know increased volume is expected for a particular subscriber, you can
 gracefully upgrade by registering over a websocket connection instead. In that
 case, this library will internally register itself as an http subscriber and
 forward messages across the websocket connection; when running a single
-httppubsub server this results in minimal overhead, and when running multiple
+broadcaster server this results in minimal overhead, and when running multiple
 this ensures you still receive messages even if they are sent to a different
 server.
 
 The main thing that you need to watch out for / maintain is subscriptions that
 are no longer needed, but since they are all visible within a simple SQL
 structure on your database, your existing tools will be able to help you with
-that.
+that. Further, this has idempotent endpoints for http subscribers to ensure they
+naturally recover from errors (rather than cascading them)
 
 ## Additional Features
 
@@ -103,7 +104,7 @@ pip freeze > requirements.txt
 #   main.py will load from this to reduce the odds you accidentally check them in
 
 # subscriber-secrets.json contains the secrets that the subscribers need; see the
-#  `httppubserver` package for more information on how to use this.
+#  `lonelypsc` package for more information on how to use this.
 
 # Run the server
 uvicorn main:app
