@@ -201,9 +201,8 @@ def setup_locally(
     import_config = "\n".join(
         sorted(
             [
-                f"import lonelypss.config.helpers.{db}_db_config as db_config",
-                f"import lonelypss.config.helpers.{to_broadcasters_auth}_auth_config as incoming_auth_config",
-                f"import lonelypss.config.helpers.{to_subscribers_auth}_auth_config as outgoing_auth_config",
+                f"import lonelypsp.auth.helpers.{to_broadcasters_auth}_auth_config as incoming_auth_config",
+                f"import lonelypsp.auth.helpers.{to_subscribers_auth}_auth_config as outgoing_auth_config",
             ]
         )
     )
@@ -217,9 +216,10 @@ def setup_locally(
 from typing import AsyncIterator
 
 {import_config}
+import lonelypss.config.helpers.{db}_db_config as db_config
 from fastapi import FastAPI
+from lonelypsp.auth.config import AuthConfigFromParts
 from lonelypss.bknd.sweep_missed import sweep_missed
-from lonelypss.config.auth_config import AuthConfigFromParts
 from lonelypss.config.config import (
     CompressionConfigFromParts,
     Config,
