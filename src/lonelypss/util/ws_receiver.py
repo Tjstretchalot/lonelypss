@@ -59,7 +59,7 @@ class BaseWSReceiver(Protocol):
         topic: bytes,
         sha512: bytes,
         length: int,
-    ) -> None:
+    ) -> int:
         """Handles the incoming message on the given topic. It can be assumed
         the stream can be consumed quickly and is not being consumed
         concurrently, but it must not be closed, as the caller may afterward
@@ -70,6 +70,8 @@ class BaseWSReceiver(Protocol):
         a timeout on a send after which point you copy whatever is remaining to
         a place you control then return back so the stream can be used by the next
         receiver (if any)
+
+        Returns the number of subscribers that were forwarded the message
         """
 
     async def on_small_incoming(
@@ -79,11 +81,13 @@ class BaseWSReceiver(Protocol):
         *,
         topic: bytes,
         sha512: bytes,
-    ) -> None:
+    ) -> int:
         """Handles the incoming message on the given topic. This is used if
         the data is small enough that spooling is not necessary which allows
         us to concurrently call this function safely (since all the arguments
         are immutable)
+
+        Returns the number of subscribers that were forwarded the message
         """
 
     async def on_missed(
@@ -91,9 +95,11 @@ class BaseWSReceiver(Protocol):
         /,
         *,
         topic: bytes,
-    ) -> None:
+    ) -> int:
         """Handles that this receiver may have missed some messages on the
         given topic
+
+        Returns the number of subscribers that were forwarded the message
         """
 
 
@@ -533,7 +539,7 @@ class SimpleFanoutWSReceiver:
         topic: bytes,
         sha512: bytes,
         length: int,
-    ) -> None:
+    ) -> int:
         is_tellable: bool
         is_seekable: bool
 
@@ -583,13 +589,15 @@ class SimpleFanoutWSReceiver:
 
         try:
             start_pos = std_io.tell()
+            count = 0
             for receiver in self.iter_receivers():
                 if not receiver.is_relevant(topic):
                     continue
                 std_io.seek(start_pos, os.SEEK_SET)
-                await receiver.on_large_exclusive_incoming(
+                count += await receiver.on_large_exclusive_incoming(
                     stream, topic=topic, sha512=sha512, length=length
                 )
+            return count
         finally:
             if need_close:
                 std_io.close()
@@ -601,22 +609,26 @@ class SimpleFanoutWSReceiver:
         *,
         topic: bytes,
         sha512: bytes,
-    ) -> None:
+    ) -> int:
+        count = 0
         for receiver in self.iter_receivers():
             if not receiver.is_relevant(topic):
                 continue
-            await receiver.on_small_incoming(data, topic=topic, sha512=sha512)
+            count += await receiver.on_small_incoming(data, topic=topic, sha512=sha512)
+        return count
 
     async def on_missed(
         self,
         /,
         *,
         topic: bytes,
-    ) -> None:
+    ) -> int:
+        count = 0
         for receiver in self.iter_receivers():
             if not receiver.is_relevant(topic):
                 continue
-            await receiver.on_missed(topic=topic)
+            count += await receiver.on_missed(topic=topic)
+        return count
 
 
 if TYPE_CHECKING:

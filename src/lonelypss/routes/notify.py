@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import json
 import logging
 import tempfile
@@ -112,7 +113,7 @@ async def notify(
         hasher = hashlib.sha512()
 
         while True:
-            chunk = request_body.read(4096)
+            chunk = request_body.read(io.DEFAULT_BUFFER_SIZE)
             if not chunk:
                 break
             hasher.update(chunk)
@@ -254,7 +255,7 @@ async def handle_trusted_notify(
         sha512 (bytes): the sha512 hash of the content (64 bytes)
     """
     succeeded = 0
-    attempted = 0
+    failed = 0
     headers: Dict[str, str] = {
         "Content-Type": "application/octet-stream",
         "Content-Length": str(content_length),
@@ -270,10 +271,10 @@ async def handle_trusted_notify(
             return TrustedNotifyResultUnavailable(
                 type=TrustedNotifyResultType.UNAVAILABLE,
                 partial_succeeded=succeeded,
-                partial_failed=attempted - succeeded,
+                partial_failed=failed,
             )
 
-        attempted += 1
+        failed += 1
         my_authorization = await config.authorize_receive(
             url=subscriber.url, topic=topic, message_sha512=sha512, now=time.time()
         )
@@ -294,7 +295,24 @@ async def handle_trusted_notify(
                     logging.debug(
                         f"Successfully notified {subscriber.url} about {topic!r}"
                     )
-                    succeeded += 1
+
+                    num_subscribers = 1
+
+                    content_type = resp.headers.get("Content-Type")
+                    if content_type is not None and content_type.startswith(
+                        "application/json"
+                    ):
+                        content = await resp.json()
+                        if (
+                            isinstance(content, dict)
+                            and isinstance(content.get("subscribers"), int)
+                            and content["subscribers"] >= 0
+                        ):
+                            num_subscribers = content["subscribers"]
+
+                    succeeded += num_subscribers
+                    failed -= 1
+
                 else:
                     logging.warning(
                         f"Failed to notify {subscriber.url} about {topic!r}: {resp.status}"
@@ -335,5 +353,5 @@ async def handle_trusted_notify(
     return TrustedNotifyResultOK(
         type=TrustedNotifyResultType.OK,
         succeeded=succeeded,
-        failed=attempted - succeeded,
+        failed=failed,
     )

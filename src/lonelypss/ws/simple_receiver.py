@@ -40,7 +40,7 @@ class SimpleReceiver:
         topic: bytes,
         sha512: bytes,
         length: int,
-    ) -> None:
+    ) -> int:
         finished = asyncio.Event()
         await self.queue.put(
             InternalLargeMessage(
@@ -53,6 +53,7 @@ class SimpleReceiver:
             )
         )
         await finished.wait()
+        return 1
 
     async def on_small_incoming(
         self,
@@ -61,17 +62,19 @@ class SimpleReceiver:
         *,
         topic: bytes,
         sha512: bytes,
-    ) -> None:
+    ) -> int:
         await self.queue.put(
             InternalSmallMessage(
                 type=InternalMessageType.SMALL, topic=topic, data=data, sha512=sha512
             )
         )
+        return 1
 
-    async def on_missed(self, /, *, topic: bytes) -> None:
+    async def on_missed(self, /, *, topic: bytes) -> int:
         await self.queue.put(
             InternalMissedMessage(type=InternalMessageType.MISSED, topic=topic)
         )
+        return 1
 
 
 if TYPE_CHECKING:

@@ -142,14 +142,18 @@ async def receive_for_websockets(
         spooled_request_body.seek(0)
         if read_length < config.message_body_spool_size:
             small_body = spooled_request_body.read()
-            await receiver.on_small_incoming(
+            count = await receiver.on_small_incoming(
                 small_body, topic=topic, sha512=real_digest
             )
         else:
-            await receiver.on_large_exclusive_incoming(
+            count = await receiver.on_large_exclusive_incoming(
                 spooled_request_body,
                 topic=topic,
                 sha512=real_digest,
                 length=read_length,
             )
-    return Response(status_code=200)
+    return Response(
+        status_code=200,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        content=b'{"subscribers": ' + str(count).encode("ascii") + b"}",
+    )
