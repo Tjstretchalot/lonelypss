@@ -55,7 +55,8 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
     if message.identifier != state.notify_stream_state.identifier:
         raise Exception("notify stream: identifier mismatch")
 
-    if message.part_id != state.notify_stream_state.part_id + 1:
+    received_part_id = 0 if message.part_id is None else message.part_id
+    if received_part_id != state.notify_stream_state.part_id + 1:
         raise Exception("notify stream: part_id mismatch")
 
     first = state.notify_stream_state.first
@@ -77,7 +78,7 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
 
     state.notify_stream_state.body_hasher.update(message.payload)
     state.notify_stream_state.body.write(message.payload)
-    state.notify_stream_state.part_id = message.part_id
+    state.notify_stream_state.part_id = received_part_id
 
     read_so_far = state.notify_stream_state.body.tell()
     expected_length = (
@@ -96,7 +97,7 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
                 B2S_ContinueNotify(
                     type=BroadcasterToSubscriberStatefulMessageType.CONTINUE_NOTIFY,
                     identifier=message.identifier,
-                    part_id=message.part_id,
+                    part_id=received_part_id,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),
