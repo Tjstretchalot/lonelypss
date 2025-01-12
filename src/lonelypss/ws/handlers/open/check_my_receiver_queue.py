@@ -3,6 +3,8 @@ import io
 import tempfile
 from typing import Union
 
+from lonelypsp.util.bounded_deque import BoundedDequeFullError
+
 from lonelypss.ws.handlers.open.check_result import CheckResult
 from lonelypss.ws.handlers.open.senders.send_any import send_any
 from lonelypss.ws.state import (
@@ -15,20 +17,26 @@ from lonelypss.ws.state import (
 )
 
 
-async def check_internal_message_task(state: StateOpen) -> CheckResult:
+async def check_my_receiver_queue(state: StateOpen) -> CheckResult:
     """Makes progress using the result of the read task, if possible. Raises
     an exception to indicate that we should begin the cleanup and shutdown
     process
     """
-    if not state.internal_message_task.done():
+    if state.my_receiver.queue.empty():
         return CheckResult.CONTINUE
 
-    result = state.internal_message_task.result()
-    state.internal_message_task = asyncio.create_task(state.my_receiver.queue.get())
+    result = state.my_receiver.queue.get_nowait()
 
     if state.send_task is None and not state.unsent_messages:
         state.send_task = asyncio.create_task(send_any(state, result))
         return CheckResult.RESTART
+
+    try:
+        state.unsent_messages.ensure_space_for(1)
+    except BoundedDequeFullError:
+        if result.type == InternalMessageType.LARGE:
+            result.finished.set()
+        raise
 
     if result.type != InternalMessageType.LARGE:
         state.unsent_messages.append(result)
@@ -36,6 +44,7 @@ async def check_internal_message_task(state: StateOpen) -> CheckResult:
 
     spooled = _spool_large_message(state, result)
     state.unsent_messages.append(spooled)
+
     return CheckResult.RESTART
 
 

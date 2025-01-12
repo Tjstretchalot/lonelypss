@@ -210,6 +210,7 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
     ) as decompressed_file:
         hasher = hashlib.sha512()
         pos = 0
+        body.seek(0)
         with (
             maybe_write_large_message_for_training(
                 state, first.decompressed_length

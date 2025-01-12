@@ -1,11 +1,21 @@
 import asyncio
-from collections import deque
-from typing import TYPE_CHECKING, Iterable, List, Optional, SupportsIndex, Union, cast
+import sys
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    List,
+    Optional,
+    Union,
+    cast,
+)
+
+from lonelypsp.util.bounded_deque import BoundedDeque
+from lonelypsp.util.cancel_and_check import cancel_and_check
 
 from lonelypss.ws.handlers.open.check_background_tasks import check_background_tasks
 from lonelypss.ws.handlers.open.check_compressors import check_compressors
-from lonelypss.ws.handlers.open.check_internal_message_task import (
-    check_internal_message_task,
+from lonelypss.ws.handlers.open.check_my_receiver_queue import (
+    check_my_receiver_queue,
 )
 from lonelypss.ws.handlers.open.check_process_task import check_process_task
 from lonelypss.ws.handlers.open.check_read_task import check_read_task
@@ -20,6 +30,7 @@ from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.state import (
     CompressorState,
     CompressorTrainingInfoType,
+    InternalMessageType,
     SimplePendingSendPreFormatted,
     State,
     StateClosing,
@@ -28,6 +39,16 @@ from lonelypss.ws.state import (
     WaitingInternalMessage,
     WaitingInternalMessageType,
 )
+
+if sys.version_info < (3, 11):
+    from typing import NoReturn
+    from typing import NoReturn as Never
+
+    def assert_never(value: Never) -> NoReturn:
+        raise AssertionError(f"Unhandled type: {value!r}")
+
+else:
+    from typing import assert_never
 
 
 async def handle_open(state: State) -> State:
@@ -44,7 +65,7 @@ async def handle_open(state: State) -> State:
             if await check_send_task(state) == CheckResult.RESTART:
                 return state
 
-            if await check_internal_message_task(state) == CheckResult.RESTART:
+            if await check_my_receiver_queue(state) == CheckResult.RESTART:
                 return state
 
             if await check_read_task(state) == CheckResult.RESTART:
@@ -59,21 +80,34 @@ async def handle_open(state: State) -> State:
             if await check_compressors(state) == CheckResult.RESTART:
                 return state
 
-            await asyncio.wait(
-                [
-                    *([state.send_task] if state.send_task is not None else []),
-                    state.internal_message_task,
-                    state.read_task,
-                    *([state.process_task] if state.process_task is not None else []),
-                    *state.backgrounded,
-                    *[
-                        compressor.task
-                        for compressor in state.compressors
-                        if compressor.type == CompressorState.PREPARING
+            owned_tasks: List[asyncio.Task[Any]] = []
+            if state.my_receiver.queue.empty():
+                owned_tasks.append(
+                    asyncio.create_task(state.my_receiver.queue.wait_not_empty())
+                )
+            try:
+                await asyncio.wait(
+                    [
+                        *([state.send_task] if state.send_task is not None else []),
+                        *owned_tasks,
+                        state.read_task,
+                        *(
+                            [state.process_task]
+                            if state.process_task is not None
+                            else []
+                        ),
+                        *state.backgrounded,
+                        *[
+                            compressor.task
+                            for compressor in state.compressors
+                            if compressor.type == CompressorState.PREPARING
+                        ],
                     ],
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in owned_tasks:
+                    await cancel_and_check(task)
             return state
         except NormalDisconnectException:
             if state.send_task is not None:
@@ -84,12 +118,10 @@ async def handle_open(state: State) -> State:
                 asyncio.Task[None], asyncio.create_task(asyncio.Event().wait())
             )
             old_unsent = state.unsent_messages
-            state.unsent_messages = VoidingDeque()
+            state.unsent_messages = BoundedDeque(maxlen=0)
 
             while old_unsent:
                 _cleanup(old_unsent.popleft())
-
-            state.internal_message_task.cancel()
 
             if not _disconnected_receiver:
                 _disconnected_receiver = True
@@ -121,7 +153,6 @@ async def handle_open(state: State) -> State:
                     cleanup_exceptions.append(e2)
 
         state.read_task.cancel()
-        state.internal_message_task.cancel()
 
         if state.notify_stream_state is not None:
             try:
@@ -198,6 +229,19 @@ async def _disconnect_receiver(state: StateOpen) -> None:
         except BaseException as e:
             excs.append(e)
 
+    for msg in state.my_receiver.queue.drain():
+        if msg.type == InternalMessageType.SMALL:
+            continue
+
+        if msg.type == InternalMessageType.LARGE:
+            msg.finished.set()
+            continue
+
+        if msg.type == InternalMessageType.MISSED:
+            continue
+
+        assert_never(msg)
+
     if excs:
         raise combine_multiple_exceptions(
             "failed to properly disconnect receiver", excs
@@ -210,44 +254,3 @@ SendT = Union[WaitingInternalMessage, SimplePendingSendPreFormatted]
 def _cleanup(value: SendT) -> None:
     if value.type == WaitingInternalMessageType.SPOOLED_LARGE:
         value.stream.close()
-
-
-class VoidingDeque(deque[SendT]):
-    def append(self, value: SendT, /) -> None:
-        _cleanup(value)
-
-    def appendleft(self, value: SendT, /) -> None:
-        _cleanup(value)
-
-    def insert(self, i: int, x: SendT, /) -> None:
-        _cleanup(x)
-
-    def extend(self, iterable: Iterable[SendT], /) -> None:
-        for v in iterable:
-            _cleanup(v)
-
-    def extendleft(self, iterable: Iterable[SendT], /) -> None:
-        for v in iterable:
-            _cleanup(v)
-
-    def __setitem__(
-        self,
-        key: Union[int, slice, SupportsIndex],
-        value: Union[SendT, Iterable[SendT]],
-        /,
-    ) -> None:
-        if isinstance(key, slice):
-            for v in cast(Iterable[SendT], value):
-                _cleanup(v)
-        else:
-            _cleanup(cast(SendT, value))
-
-    def __iadd__(self, other: Iterable[SendT], /) -> "VoidingDeque":
-        for v in other:
-            _cleanup(v)
-        return self
-
-    def __add__(self, other: deque[SendT], /) -> "VoidingDeque":
-        for v in other:
-            _cleanup(v)
-        return self

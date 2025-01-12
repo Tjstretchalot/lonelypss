@@ -5,7 +5,6 @@ import io
 import secrets
 import tempfile
 import time
-from collections import deque
 from typing import TYPE_CHECKING, List, cast
 
 import aiohttp
@@ -19,6 +18,8 @@ from lonelypsp.stateful.messages.confirm_configure import (
     serialize_b2s_confirm_configure,
 )
 from lonelypsp.stateful.parser_helpers import parse_s2b_message_prefix
+from lonelypsp.util.bounded_deque import BoundedDeque
+from lonelypsp.util.drainable_asyncio_queue import DrainableAsyncioQueue
 
 from lonelypss.util.websocket_message import WSMessageBytes
 from lonelypss.ws.handlers.protocol import StateHandler
@@ -171,7 +172,6 @@ async def handle_waiting_configure(state: State) -> State:
             broadcaster_counter=1,
             subscriber_counter=-1,
             read_task=make_websocket_read_task(state.websocket),
-            internal_message_task=asyncio.create_task(receiver.queue.get()),
             notify_stream_state=None,
             send_task=asyncio.create_task(
                 state.websocket.send_bytes(
@@ -186,14 +186,14 @@ async def handle_waiting_configure(state: State) -> State:
                 )
             ),
             process_task=None,
-            unprocessed_messages=deque(
+            unprocessed_messages=BoundedDeque(
                 maxlen=state.broadcaster_config.websocket_max_unprocessed_receives
             ),
-            unsent_messages=deque(
+            unsent_messages=BoundedDeque(
                 maxlen=state.broadcaster_config.websocket_max_pending_sends
             ),
-            expecting_acks=asyncio.Queue(
-                maxsize=state.broadcaster_config.websocket_send_max_unacknowledged or 0
+            expecting_acks=DrainableAsyncioQueue(
+                max_size=state.broadcaster_config.websocket_send_max_unacknowledged or 0
             ),
             backgrounded=set(),
         )

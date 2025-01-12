@@ -2,6 +2,8 @@ import asyncio
 import re
 from typing import TYPE_CHECKING, List, Optional, Set, Tuple, Type
 
+from lonelypsp.util.drainable_asyncio_queue import DrainableAsyncioQueue
+
 from lonelypss.util.sync_io import SyncReadableBytesIO
 from lonelypss.ws.state import (
     AsyncioWSReceiver,
@@ -19,7 +21,7 @@ class SimpleReceiver:
         self.glob_subscriptions: List[Tuple[re.Pattern, str]] = []
         self.receiver_id: Optional[int] = None
 
-        self.queue: asyncio.Queue[InternalMessage] = asyncio.Queue()
+        self.queue: DrainableAsyncioQueue[InternalMessage] = DrainableAsyncioQueue()
 
     def is_relevant(self, topic: bytes) -> bool:
         if topic in self.exact_subscriptions:

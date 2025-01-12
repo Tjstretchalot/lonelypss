@@ -1,7 +1,6 @@
 import asyncio
 import hashlib
 import re
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import List, Literal, Optional, Protocol, Set, Tuple, Union
@@ -15,6 +14,8 @@ from lonelypsp.stateful.messages.notify_stream import (
     S2B_NotifyStreamStartCompressed,
     S2B_NotifyStreamStartUncompressed,
 )
+from lonelypsp.util.bounded_deque import BoundedDeque
+from lonelypsp.util.drainable_asyncio_queue import DrainableAsyncioQueue
 
 from lonelypss.config.config import Config
 from lonelypss.util.sync_io import SyncIOBaseLikeIO, SyncReadableBytesIO
@@ -274,7 +275,7 @@ class AsyncioWSReceiver(BaseWSReceiver, Protocol):
         """
 
     @property
-    def queue(self) -> asyncio.Queue[InternalMessage]:
+    def queue(self) -> DrainableAsyncioQueue[InternalMessage]:
         """The queue that this receiver pushes messages to. For large messages,
         this involves generating a finished event that is wait()'d before returning
         """
@@ -623,11 +624,6 @@ class StateOpen:
     websocket from the ASGI server
     """
 
-    internal_message_task: asyncio.Task[InternalMessage]
-    """The task that is currently responsible for getting the next message from 
-    my_receiver.queue
-    """
-
     notify_stream_state: Optional[NotifyStreamState]
     """If there is a NOTIFY_STREAM sequence that has not completed yet, the state
     of that sequence, otherwise None
@@ -643,7 +639,7 @@ class StateOpen:
     is doing that, otherwise None
     """
 
-    unprocessed_messages: deque[S2B_Message]
+    unprocessed_messages: BoundedDeque[S2B_Message]
     """If the broadcaster has received messages from the subscriber that it has not
     yet processed, the messages that have not been processed in the order they were 
     received.
@@ -651,7 +647,9 @@ class StateOpen:
     basic idea: websocket incoming -> read_task -> unprocessed_messages -> process_task
     """
 
-    unsent_messages: deque[Union[WaitingInternalMessage, SimplePendingSendPreFormatted]]
+    unsent_messages: BoundedDeque[
+        Union[WaitingInternalMessage, SimplePendingSendPreFormatted]
+    ]
     """If the broadcaster knows it needs to send messages to the subscriber that it
     has not yet sent because the websocket was busy (send_task was set), the messages
     that need to be sent in the order they should be sent.
@@ -663,7 +661,9 @@ class StateOpen:
     - scenario 2: my_receiver.queue -> message_task -> unsent_messages -> send_task (e.g., receive)
     """
 
-    expecting_acks: asyncio.Queue[Union[S2B_ContinueReceive, S2B_ConfirmReceive]]
+    expecting_acks: DrainableAsyncioQueue[
+        Union[S2B_ContinueReceive, S2B_ConfirmReceive]
+    ]
     """When the broadcaster sends a RECEIVE_STREAM message to the subscriber the
     subscriber must acknowledge the message. If there are enough messages that have
     not been acknowledged, the broadcaster begins to wait for acknowledgements before
