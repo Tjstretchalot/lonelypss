@@ -288,7 +288,8 @@ async def handle_trusted_notify(
         try:
             async with session.post(
                 subscriber.url,
-                data=guarded_request_body,
+                # https://github.com/aio-libs/aiohttp/issues/10325
+                data=None if content_length == 0 else guarded_request_body,
                 headers=headers,
             ) as resp:
                 if resp.ok:
