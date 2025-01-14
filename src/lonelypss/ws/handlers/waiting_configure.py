@@ -150,7 +150,14 @@ async def handle_waiting_configure(state: State) -> State:
             internal_receiver=state.internal_receiver,
             my_receiver=receiver,
             my_receiver_id=receiver_id,
-            client_session=aiohttp.ClientSession(),
+            client_session=aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(
+                    total=state.broadcaster_config.outgoing_http_timeout_total,
+                    connect=state.broadcaster_config.outgoing_http_timeout_connect,
+                    sock_read=state.broadcaster_config.outgoing_http_timeout_sock_read,
+                    sock_connect=state.broadcaster_config.outgoing_http_timeout_sock_connect,
+                )
+            ),
             compressors=compressors,
             compressor_training_info=(
                 None
