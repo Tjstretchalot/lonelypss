@@ -226,6 +226,7 @@ from lonelypss.config.config import (
     ConfigFromParts,
     GenericConfigFromValues,
     MissedRetryStandard,
+    NotifySessionStandard,
 )
 from lonelypss.config.lifespan import setup_config, teardown_config
 from lonelypss.middleware.config import ConfigMiddleware
@@ -278,6 +279,7 @@ def _make_config() -> Config:{load_auth_secrets}
             compression_retrain_interval_seconds=60 * 60 * 60,
             decompression_max_window_size=8 * 1024 * 1024,
         ),
+        notify_session=NotifySessionStandard(),
     )
 
 

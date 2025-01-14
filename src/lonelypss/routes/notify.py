@@ -141,22 +141,14 @@ async def notify(
             return Response(status_code=400)
 
         request_body.seek(2 + topic_length + 64 + 8)
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(
-                total=config.outgoing_http_timeout_total,
-                connect=config.outgoing_http_timeout_connect,
-                sock_read=config.outgoing_http_timeout_sock_read,
-                sock_connect=config.outgoing_http_timeout_sock_connect,
-            )
-        ) as session:
-            notify_result = await handle_trusted_notify(
-                topic,
-                request_body,
-                config=config,
-                session=session,
-                content_length=message_length,
-                sha512=actual_hash,
-            )
+        notify_result = await handle_trusted_notify(
+            topic,
+            request_body,
+            config=config,
+            session=config.http_notify_client_session,
+            content_length=message_length,
+            sha512=actual_hash,
+        )
 
         if notify_result.type == TrustedNotifyResultType.UNAVAILABLE:
             return Response(status_code=503)

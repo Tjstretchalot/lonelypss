@@ -8,6 +8,11 @@ async def setup_config(config: Config) -> None:
         await config.setup_to_subscriber_auth()
         try:
             await config.setup_db()
+            try:
+                await config.setup_http_notify_client_session(config)
+            except BaseException:
+                await config.teardown_db()
+                raise
         except BaseException:
             await config.teardown_to_subscriber_auth()
             raise
@@ -19,9 +24,12 @@ async def setup_config(config: Config) -> None:
 async def teardown_config(config: Config) -> None:
     """Convenience function to teardown the configuration (similiar idea to aenter)"""
     try:
-        await config.teardown_db()
+        await config.teardown_http_notify_client_session()
     finally:
         try:
-            await config.teardown_to_subscriber_auth()
+            await config.teardown_db()
         finally:
-            await config.teardown_to_broadcaster_auth()
+            try:
+                await config.teardown_to_subscriber_auth()
+            finally:
+                await config.teardown_to_broadcaster_auth()

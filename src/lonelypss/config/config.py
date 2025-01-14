@@ -15,6 +15,7 @@ from typing import (
     Union,
 )
 
+import aiohttp
 from lonelypsp.auth.config import AuthConfig
 from lonelypsp.compat import fast_dataclass
 from lonelypsp.stateful.messages.configure import S2B_Configure
@@ -776,8 +777,62 @@ class CompressionConfigFromParts:
         return (zdict, 10)
 
 
+class NotifySessionConfig(Protocol):
+    async def setup_http_notify_client_session(self, config: "Config") -> None:
+        """Called to initialize the aiohttp.ClientSession used when receiving
+        NOTIFY messages from the http endpoint
+        """
+
+    @property
+    def http_notify_client_session(self) -> aiohttp.ClientSession:
+        """The aiohttp.ClientSession used when receiving NOTIFY messages from the http endpoint.
+        Should raise an error if not setup
+        """
+        ...
+
+    async def teardown_http_notify_client_session(self) -> None:
+        """Called to close the aiohttp.ClientSession used when receiving
+        NOTIFY messages from the http endpoint
+        """
+
+
+class NotifySessionStandard:
+    """Standard implementation of NotifySessionConfig"""
+
+    def __init__(self) -> None:
+        self.client_session: Optional[aiohttp.ClientSession] = None
+
+    async def setup_http_notify_client_session(self, config: "Config") -> None:
+        assert self.client_session is None, "already setup"
+        self.client_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(
+                total=config.outgoing_http_timeout_total,
+                connect=config.outgoing_http_timeout_connect,
+                sock_read=config.outgoing_http_timeout_sock_read,
+                sock_connect=config.outgoing_http_timeout_sock_connect,
+            )
+        )
+
+    @property
+    def http_notify_client_session(self) -> aiohttp.ClientSession:
+        assert self.client_session is not None, "not setup"
+        return self.client_session
+
+    async def teardown_http_notify_client_session(self) -> None:
+        assert self.client_session is not None, "not setup"
+        sess = self.client_session
+        self.client_session = None
+        await sess.close()
+
+
 class Config(
-    AuthConfig, DBConfig, GenericConfig, MissedRetryConfig, CompressionConfig, Protocol
+    AuthConfig,
+    DBConfig,
+    GenericConfig,
+    MissedRetryConfig,
+    CompressionConfig,
+    NotifySessionConfig,
+    Protocol,
 ):
     """The injected behavior required for the lonelypss to operate. This is
     generally generated for you using one of the templates, see the readme for details
@@ -794,12 +849,14 @@ class ConfigFromParts:
         generic: GenericConfig,
         missed: MissedRetryConfig,
         compression: CompressionConfig,
+        notify_session: NotifySessionConfig,
     ):
         self.auth = auth
         self.db = db
         self.generic = generic
         self.missed = missed
         self.compression = compression
+        self.notify_session_config = notify_session
 
     async def setup_to_broadcaster_auth(self) -> None:
         await self.auth.setup_to_broadcaster_auth()
@@ -1160,9 +1217,20 @@ class ConfigFromParts:
     def sweep_missed_interval(self) -> float:
         return self.generic.sweep_missed_interval
 
+    async def setup_http_notify_client_session(self, config: "Config") -> None:
+        await self.notify_session_config.setup_http_notify_client_session(config)
+
+    @property
+    def http_notify_client_session(self) -> aiohttp.ClientSession:
+        return self.notify_session_config.http_notify_client_session
+
+    async def teardown_http_notify_client_session(self) -> None:
+        await self.notify_session_config.teardown_http_notify_client_session()
+
 
 if TYPE_CHECKING:
     _a: Type[GenericConfig] = GenericConfigFromValues
     _b: Type[CompressionConfig] = CompressionConfigFromParts
     _c: Type[MissedRetryConfig] = MissedRetryStandard
-    _d: Type[Config] = ConfigFromParts
+    _d: Type[NotifySessionConfig] = NotifySessionStandard
+    _e: Type[Config] = ConfigFromParts
