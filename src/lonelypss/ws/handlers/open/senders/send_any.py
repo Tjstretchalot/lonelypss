@@ -1,6 +1,15 @@
 from typing import TYPE_CHECKING, Any, Dict, Union, cast
 
 from lonelypss.ws.handlers.open.senders.protocol import Sender
+from lonelypss.ws.handlers.open.senders.send_disable_zstd_custom import (
+    send_disable_zstd_custom,
+)
+from lonelypss.ws.handlers.open.senders.send_enable_zstd_custom import (
+    send_enable_zstd_custom,
+)
+from lonelypss.ws.handlers.open.senders.send_enable_zstd_preset import (
+    send_enable_zstd_preset,
+)
 from lonelypss.ws.handlers.open.senders.send_internal_large_message import (
     send_internal_large_message,
 )
@@ -21,6 +30,9 @@ from lonelypss.ws.state import (
     InternalMessageType,
     InternalMissedMessage,
     InternalSmallMessage,
+    SimplePendingSendDisableZstdCustom,
+    SimplePendingSendEnableZstdCustom,
+    SimplePendingSendEnableZstdPreset,
     SimplePendingSendPreFormatted,
     SimplePendingSendType,
     StateOpen,
@@ -34,6 +46,9 @@ Sendable = Union[
     InternalLargeMessage,
     WaitingInternalSpooledLargeMessage,
     SimplePendingSendPreFormatted,
+    SimplePendingSendEnableZstdPreset,
+    SimplePendingSendEnableZstdCustom,
+    SimplePendingSendDisableZstdCustom,
 ]
 
 SENDERS: Dict[Any, Any] = {
@@ -42,6 +57,9 @@ SENDERS: Dict[Any, Any] = {
     InternalMessageType.LARGE: send_internal_large_message,
     WaitingInternalMessageType.SPOOLED_LARGE: send_waiting_internal_spooled_large_message,
     SimplePendingSendType.PRE_FORMATTED: send_simple_pending_send_pre_formatted,
+    SimplePendingSendType.ENABLE_ZSTD_PRESET: send_enable_zstd_preset,
+    SimplePendingSendType.ENABLE_ZSTD_CUSTOM: send_enable_zstd_custom,
+    SimplePendingSendType.DISABLE_ZSTD_CUSTOM: send_disable_zstd_custom,
 }
 
 

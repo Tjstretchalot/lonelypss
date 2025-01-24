@@ -5,14 +5,8 @@ import time
 from types import TracebackType
 from typing import TYPE_CHECKING, List, Optional, Protocol, Tuple, Type
 
-from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
-from lonelypsp.stateful.messages.disable_zstd_custom import (
-    B2S_DisableZstdCustom,
-    serialize_b2s_disable_zstd_custom,
-)
-
 from lonelypss.util.sync_io import read_exact
-from lonelypss.ws.handlers.open.send_simple_asap import send_simple_asap
+from lonelypss.ws.handlers.open.send_simple_asap import send_asap
 from lonelypss.ws.state import (
     Compressor,
     CompressorPreparing,
@@ -22,6 +16,8 @@ from lonelypss.ws.state import (
     CompressorTrainingInfoBeforeHighWatermark,
     CompressorTrainingInfoType,
     CompressorTrainingInfoWaitingToRefresh,
+    SimplePendingSendDisableZstdCustom,
+    SimplePendingSendType,
     StateOpen,
 )
 
@@ -167,14 +163,11 @@ def rotate_in_compressor(state: StateOpen, compressor: Compressor) -> None:
         if candidate.type == CompressorState.PREPARING:
             candidate.task.cancel()
 
-        send_simple_asap(
+        send_asap(
             state,
-            serialize_b2s_disable_zstd_custom(
-                B2S_DisableZstdCustom(
-                    type=BroadcasterToSubscriberStatefulMessageType.DISABLE_ZSTD_CUSTOM,
-                    identifier=candidate.identifier,
-                ),
-                minimal_headers=state.broadcaster_config.websocket_minimal_headers,
+            SimplePendingSendDisableZstdCustom(
+                type=SimplePendingSendType.DISABLE_ZSTD_CUSTOM,
+                identifier=candidate.identifier,
             ),
         )
         break

@@ -117,18 +117,22 @@ async def send_uncompressed_receive_stream(
             reading from the stream and released right after reading the stream, which
             can be used to "promote" the read to async
     """
+    identifier = secrets.token_bytes(4)
+    tracing = b""  # TODO: tracing
     authorization = await state.broadcaster_config.authorize_receive(
+        tracing=tracing,
         url=make_for_send_websocket_url_and_change_counter(state),
         topic=topic,
         message_sha512=sha512,
+        identifier=identifier,
         now=time.time(),
     )
-    identifier = secrets.token_bytes(4)
 
     headers = serialize_b2s_receive_stream(
         B2S_ReceiveStreamStartUncompressed(
             type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
             authorization=authorization,
+            tracing=tracing,
             identifier=identifier,
             part_id=None,
             topic=topic,
@@ -228,15 +232,19 @@ async def send_compressed_receive_stream(
         to_send.seek(0)
 
         identifier = secrets.token_bytes(4)
+        tracing = b""  # TODO: tracing
         headers = serialize_b2s_receive_stream(
             B2S_ReceiveStreamStartCompressed(
                 type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
                 authorization=await state.broadcaster_config.authorize_receive(
+                    tracing=tracing,
                     url=make_for_send_websocket_url_and_change_counter(state),
                     topic=topic,
                     message_sha512=compressed_sha512,
+                    identifier=identifier,
                     now=time.time(),
                 ),
+                tracing=tracing,
                 identifier=identifier,
                 part_id=None,
                 topic=topic,
@@ -320,12 +328,16 @@ async def send_receive_stream_given_first_headers(
                 S2B_ConfirmReceive(
                     type=SubscriberToBroadcasterStatefulMessageType.CONFIRM_RECEIVE,
                     identifier=identifier,
+                    authorization=None,
+                    tracing=b"",
                 )
                 if is_done
                 else S2B_ContinueReceive(
                     type=SubscriberToBroadcasterStatefulMessageType.CONTINUE_RECEIVE,
                     identifier=identifier,
                     part_id=part_id,
+                    authorization=None,
+                    tracing=b"",
                 )
             )
             await state.websocket.send_bytes(headers + payload)
@@ -334,16 +346,20 @@ async def send_receive_stream_given_first_headers(
                 return
 
             part_id += 1
+            tracing = b""  # TODO: tracing
             authorization = await state.broadcaster_config.authorize_receive(
+                tracing=tracing,
                 url=make_for_send_websocket_url_and_change_counter(state),
                 topic=topic,
                 message_sha512=sha512,
+                identifier=identifier,
                 now=time.time(),
             )
             headers = serialize_b2s_receive_stream(
                 B2S_ReceiveStreamContinuation(
                     type=BroadcasterToSubscriberStatefulMessageType.RECEIVE_STREAM,
                     authorization=authorization,
+                    tracing=tracing,
                     identifier=identifier,
                     part_id=part_id,
                     payload=b"",

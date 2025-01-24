@@ -240,6 +240,27 @@ class SimplePendingSendType(Enum):
     PRE_FORMATTED = auto()
     """A message that is ready to be sent via send_bytes"""
 
+    ENABLE_ZSTD_PRESET = auto()
+    """Tell the subscriber that a certain compressor can be used by the broadcaster.
+    Since the subscriber will process messages in order, the broadcaster can immediately
+    start using the compressor
+    """
+
+    ENABLE_ZSTD_CUSTOM = auto()
+    """Tell the subscriber a custom compression dictionary was created for this
+    connection and it will be used by the broadcaster. Since the subscriber will
+    process messages in order, the broadcaster can immediately start using the
+    compressor
+    """
+
+    DISABLE_ZSTD_CUSTOM = auto()
+    """Tell the subscriber that a certain compressor won't be used by the
+    broadcaster anymore and can be released; it's assumed that before this point
+    the subscriber has already naturally stopped using the compressor, so it's not
+    important that there is a period between us no longer being able to decompress
+    messages with the compressor and us sending that information to the subscriber
+    """
+
 
 @dataclass
 class SimplePendingSendPreFormatted:
@@ -252,6 +273,81 @@ class SimplePendingSendPreFormatted:
 
     data: bytes
     """the data to send"""
+
+
+@dataclass
+class SimplePendingSendEnableZstdPreset:
+    """Produces an authorization header and sends a ENABLE_ZSTD_PRESET packet"""
+
+    type: Literal[SimplePendingSendType.ENABLE_ZSTD_PRESET]
+    """discriminator value"""
+
+    identifier: int
+    """the compressor id that will be used"""
+
+    compression_level: int
+    """the suggested compression level for this compressor"""
+
+    min_size: int
+    """the suggested minimum size of payloads when using this compressor"""
+
+    max_size: int
+    """the suggested maximum size of payloads when using this compressor, max 2^64-1"""
+
+
+@dataclass
+class SimplePendingSendEnableZstdCustom:
+    type: Literal[SimplePendingSendType.ENABLE_ZSTD_CUSTOM]
+    """discriminator value"""
+
+    identifier: int
+    """the identifier the broadcaster has assigned to compressing with this
+    dictionary
+    """
+
+    compression_level: int
+    """the compression level (any negative integer up to and including positive 22)
+    that the broadcaster recommends for this dictionary; the subscriber is free to
+    ignore this recommendation
+    """
+
+    min_size: int
+    """the minimum in size in bytes that the broadcaster recommends for using
+    this preset; the subscriber is free to ignore this recommendation
+    """
+
+    max_size: int
+    """the maximum in size in bytes that the broadcaster recommends for using
+    this preset; the subscriber is free to ignore this recommendation. 2**64-1
+    for no limit
+    """
+
+    dictionary: bytes
+    """the compression dictionary, in bytes, that is referenced when compressing
+    with this identifier
+    """
+
+    sha512: bytes
+    """the sha512 hash of the dictionary, for authorization"""
+
+
+@dataclass
+class SimplePendingSendDisableZstdCustom:
+    """Produces an authorization header and sends a DISABLE_ZSTD_CUSTOM packet"""
+
+    type: Literal[SimplePendingSendType.DISABLE_ZSTD_CUSTOM]
+    """discriminator value"""
+
+    identifier: int
+    """the compressor id that will no longer be used"""
+
+
+SimplePendingSend = Union[
+    SimplePendingSendPreFormatted,
+    SimplePendingSendEnableZstdPreset,
+    SimplePendingSendEnableZstdCustom,
+    SimplePendingSendDisableZstdCustom,
+]
 
 
 class AsyncioWSReceiver(BaseWSReceiver, Protocol):
@@ -647,9 +743,7 @@ class StateOpen:
     basic idea: websocket incoming -> read_task -> unprocessed_messages -> process_task
     """
 
-    unsent_messages: BoundedDeque[
-        Union[WaitingInternalMessage, SimplePendingSendPreFormatted]
-    ]
+    unsent_messages: BoundedDeque[Union[WaitingInternalMessage, SimplePendingSend]]
     """If the broadcaster knows it needs to send messages to the subscriber that it
     has not yet sent because the websocket was busy (send_task was set), the messages
     that need to be sent in the order they should be sent.

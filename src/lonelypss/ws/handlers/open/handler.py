@@ -1,14 +1,13 @@
 import asyncio
-import sys
 from typing import (
     TYPE_CHECKING,
     Any,
     List,
     Optional,
-    Union,
     cast,
 )
 
+from lonelypsp.compat import assert_never
 from lonelypsp.util.bounded_deque import BoundedDeque
 from lonelypsp.util.cancel_and_check import cancel_and_check
 
@@ -26,29 +25,18 @@ from lonelypss.ws.handlers.open.errors import (
     combine_multiple_exceptions,
 )
 from lonelypss.ws.handlers.open.processors.processor import process_any
+from lonelypss.ws.handlers.open.senders.send_any import Sendable
 from lonelypss.ws.handlers.protocol import StateHandler
 from lonelypss.ws.state import (
     CompressorState,
     CompressorTrainingInfoType,
     InternalMessageType,
-    SimplePendingSendPreFormatted,
     State,
     StateClosing,
     StateOpen,
     StateType,
-    WaitingInternalMessage,
     WaitingInternalMessageType,
 )
-
-if sys.version_info < (3, 11):
-    from typing import NoReturn
-    from typing import NoReturn as Never
-
-    def assert_never(value: Never) -> NoReturn:
-        raise AssertionError(f"Unhandled type: {value!r}")
-
-else:
-    from typing import assert_never
 
 
 async def handle_open(state: State) -> State:
@@ -248,9 +236,8 @@ async def _disconnect_receiver(state: StateOpen) -> None:
         )
 
 
-SendT = Union[WaitingInternalMessage, SimplePendingSendPreFormatted]
-
-
-def _cleanup(value: SendT) -> None:
+def _cleanup(value: Sendable) -> None:
+    if value.type == InternalMessageType.LARGE:
+        value.finished.set()
     if value.type == WaitingInternalMessageType.SPOOLED_LARGE:
         value.stream.close()

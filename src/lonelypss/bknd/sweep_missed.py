@@ -1,13 +1,16 @@
 import asyncio
-import base64
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 import aiohttp
+from lonelypsp.auth.config import AuthResult
+from lonelypsp.stateless.constants import SubscriberToBroadcasterStatelessMessageType
+from lonelypsp.sync_io import PreallocatedBytesIO
 from lonelypsp.util.cancel_and_check import cancel_and_check
 
 from lonelypss.config.config import Config, MutableMissedInfo
+from lonelypss.util.async_io import async_read_exact
 
 
 async def sweep_missed_once(config: Config) -> None:
@@ -37,8 +40,17 @@ async def sweep_missed_once(config: Config) -> None:
                     return
                 continue
 
+            tracing = b""  # TODO: tracing
+
+            body = PreallocatedBytesIO(2 + len(tracing) + 2 + len(msg.info.topic))
+            body.write(len(tracing).to_bytes(2, "big"))
+            body.write(tracing)
+            body.write(len(msg.info.topic).to_bytes(2, "big"))
+            body.write(msg.info.topic)
+
             try:
                 authorization = await config.authorize_missed(
+                    tracing=tracing,
                     recovery=msg.info.subscriber_info.recovery,
                     topic=msg.info.topic,
                     now=time.time(),
@@ -52,26 +64,49 @@ async def sweep_missed_once(config: Config) -> None:
                                 if authorization is not None
                                 else {}
                             ),
-                            "X-Topic": base64.b64encode(msg.info.topic).decode("ascii"),
+                            "Content-Type": "application/octet-stream",
                         },
+                        data=body.buffer,
                     ) as resp:
-                        if resp.status >= 400 and resp.status < 500:
-                            content_type = resp.headers.get("Content-Type")
-                            if content_type is not None and content_type.startswith(
-                                "application/json"
-                            ):
-                                content = await resp.json()
-                                if (
-                                    isinstance(content, dict)
-                                    and content.get("unsubscribe") is True
-                                ):
-                                    if (
-                                        res := await msg.release(new_info=None)
-                                    ) != "ok":
-                                        return
-                                    continue
-                        resp.raise_for_status()
-                except aiohttp.ClientError:
+                        header = await async_read_exact(resp.content, 2)
+                        if header != int(
+                            SubscriberToBroadcasterStatelessMessageType.RESPONSE_CONFIRM_MISSED
+                        ):
+                            raise ValueError(
+                                f"unexpected response first 2 bytes: {header!r}"
+                            )
+
+                        resp_authorization_length_bytes = await async_read_exact(
+                            resp.content, 2
+                        )
+                        resp_authorization_length = int.from_bytes(
+                            resp_authorization_length_bytes, "big"
+                        )
+                        resp_authorization_bytes = await async_read_exact(
+                            resp.content, resp_authorization_length
+                        )
+                        resp_authorization = resp_authorization_bytes.decode("utf-8")
+                        resp_tracing_length_bytes = await async_read_exact(
+                            resp.content, 2
+                        )
+                        resp_tracing_length = int.from_bytes(
+                            resp_tracing_length_bytes, "big"
+                        )
+                        resp_tracing = await async_read_exact(
+                            resp.content, resp_tracing_length
+                        )
+
+                        resp_auth_result = await config.is_confirm_missed_allowed(
+                            tracing=resp_tracing,
+                            topic=msg.info.topic,
+                            url=msg.info.subscriber_info.recovery,
+                            now=time.time(),
+                            authorization=resp_authorization,
+                        )
+                        if resp_auth_result != AuthResult.OK:
+                            raise ValueError(f"{resp_auth_result=}")
+
+                except (ValueError, aiohttp.ClientError):
                     next_attempt = msg.info.attempts + 1
                     next_retry_at = await config.get_delay_for_next_missed_retry(
                         receive_url=msg.info.subscriber_info.url,

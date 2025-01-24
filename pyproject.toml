@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     "fastapi>=0.115",
     "aiohttp>=3.11",
-    "lonelypsp>=0.0.26"
+    "lonelypsp>=0.0.38"
 ]
 requires-python = ">=3.9"
 
@@ -47,3 +47,4 @@ target-version = "py311"
 
 [tool.ruff.lint]
 extend-select = ["I", "T201"]
+ignore = ["F821"]

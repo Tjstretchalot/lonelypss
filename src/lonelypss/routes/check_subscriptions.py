@@ -3,6 +3,10 @@ from typing import Annotated, Optional
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response
+from lonelypsp.auth.config import AuthResult
+from lonelypsp.compat import assert_never
+from lonelypsp.stateless.constants import BroadcasterToSubscriberStatelessMessageType
+from lonelypsp.sync_io import PreallocatedBytesIO
 
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.util.async_io import async_read_exact
@@ -45,6 +49,11 @@ async def check_subscriptions(
     - N bytes: the url to check, utf-8 encoded
 
     ### response body
+    - 2 bytes (type): int(RESPONSE_CHECK_SUBSCRIPTIONS), big endian, unsigned
+    - 2 bytes (A): big-endian, unsigned, the length of the authorization
+    - A bytes: the authorization
+    - 2 bytes (T): big-endian, unsigned, the length of tracing data
+    - T bytes: the tracing data
     - 1 byte (reserved for etag format): 0
     - 64 bytes: the etag
     """
@@ -55,6 +64,9 @@ async def check_subscriptions(
         try:
             body = AsyncIterableAIO(stream.__aiter__())
 
+            tracing_length_bytes = await async_read_exact(body, 2)
+            tracing_length = int.from_bytes(tracing_length_bytes, "big")
+            tracing = await async_read_exact(body, tracing_length)
             url_length_bytes = await async_read_exact(body, 2)
             url_length = int.from_bytes(url_length_bytes, "big")
             url_bytes = await async_read_exact(body, url_length)
@@ -66,24 +78,51 @@ async def check_subscriptions(
 
     auth_at = time.time()
     auth_result = await config.is_check_subscriptions_allowed(
-        url=url, now=auth_at, authorization=authorization
+        tracing=tracing, url=url, now=auth_at, authorization=authorization
     )
 
-    if auth_result == "unauthorized":
+    if auth_result == AuthResult.UNAUTHORIZED:
         return Response(status_code=401)
-    elif auth_result == "forbidden":
+    elif auth_result == AuthResult.FORBIDDEN:
         return Response(status_code=403)
-    elif auth_result == "unavailable":
+    elif auth_result == AuthResult.UNAVAILABLE:
         return Response(status_code=503)
-    assert auth_result == "ok"
+    elif auth_result != AuthResult.OK:
+        assert_never(auth_result)
 
     etag = await config.check_subscriptions(url=url)
 
-    result = bytearray(1 + len(etag.etag))
-    result[0] = etag.format
-    result[1:] = etag.etag
+    resp_tracing = b""  # TODO: tracing
+    resp_authorization = await config.authorize_check_subscriptions_response(
+        tracing=resp_tracing,
+        strong_etag=etag,
+        now=time.time(),
+    )
+    resp_authorization_bytes = (
+        b"" if resp_authorization is None else resp_authorization.encode("utf-8")
+    )
+    result = PreallocatedBytesIO(
+        2
+        + 2
+        + len(resp_authorization_bytes)
+        + 2
+        + len(resp_tracing)
+        + 1
+        + len(etag.etag)
+    )
+    result.write(
+        int(
+            BroadcasterToSubscriberStatelessMessageType.RESPONSE_CHECK_SUBSCRIPTIONS
+        ).to_bytes(2, "big")
+    )
+    result.write(len(resp_authorization_bytes).to_bytes(2, "big"))
+    result.write(resp_authorization_bytes)
+    result.write(len(resp_tracing).to_bytes(2, "big"))
+    result.write(resp_tracing)
+    result.write(etag.format.to_bytes(1, "big"))
+    result.write(etag.etag)
     return Response(
-        content=result,
+        content=result.buffer,
         headers={"Content-Type": "application/octet-stream"},
         status_code=200,
     )

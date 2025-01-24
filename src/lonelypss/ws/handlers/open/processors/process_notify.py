@@ -4,12 +4,16 @@ import io
 import tempfile
 import time
 
+from lonelypsp.auth.config import AuthResult
 from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
 from lonelypsp.stateful.messages.confirm_notify import (
     B2S_ConfirmNotify,
     serialize_b2s_confirm_notify,
 )
 from lonelypsp.stateful.messages.notify import S2B_Notify
+from lonelypsp.tracing.impl.noop.shared.handle_trusted_notify import (
+    NoopHandleTrustedNotify,
+)
 
 from lonelypss.routes.notify import TrustedNotifyResultType, handle_trusted_notify
 from lonelypss.ws.handlers.open.collector_utils import (
@@ -28,7 +32,9 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
     """
     auth_at = time.time()
     auth_result = await state.broadcaster_config.is_notify_allowed(
+        tracing=message.tracing,
         topic=message.topic,
+        identifier=message.identifier,
         message_sha512=(
             message.verified_compressed_sha512
             if message.compressor_id is not None
@@ -38,7 +44,7 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
         authorization=message.authorization,
     )
 
-    if auth_result != "ok":
+    if auth_result != AuthResult.OK:
         raise AuthRejectedException(f"notify: {auth_result}")
 
     if message.compressor_id is None:
@@ -50,11 +56,21 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
             session=state.client_session,
             content_length=len(message.uncompressed_message),
             sha512=message.verified_uncompressed_sha512,
+            tracer=NoopHandleTrustedNotify(),  # TODO: tracing
         )
 
         if notify_result.type != TrustedNotifyResultType.OK:
             raise ValueError(f"notify failed: {notify_result}")
 
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = await state.broadcaster_config.authorize_confirm_notify(
+            tracing=resp_tracing,
+            identifier=message.identifier,
+            subscribers=notify_result.succeeded,
+            topic=message.topic,
+            message_sha512=message.verified_uncompressed_sha512,
+            now=time.time(),
+        )
         send_simple_asap(
             state,
             serialize_b2s_confirm_notify(
@@ -62,6 +78,8 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
                     type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
                     identifier=message.identifier,
                     subscribers=notify_result.succeeded,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),
@@ -127,9 +145,20 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
             session=state.client_session,
             content_length=message.decompressed_length,
             sha512=decompressed_sha512,
+            tracer=NoopHandleTrustedNotify(),  # TODO: tracing
         )
         if notify_result.type != TrustedNotifyResultType.OK:
             raise ValueError(f"notify failed: {notify_result}")
+
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = await state.broadcaster_config.authorize_confirm_notify(
+            tracing=resp_tracing,
+            identifier=message.identifier,
+            subscribers=notify_result.succeeded,
+            topic=message.topic,
+            message_sha512=decompressed_sha512,
+            now=time.time(),
+        )
         send_simple_asap(
             state,
             serialize_b2s_confirm_notify(
@@ -137,6 +166,8 @@ async def process_notify(state: StateOpen, message: S2B_Notify) -> None:
                     type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
                     identifier=message.identifier,
                     subscribers=notify_result.succeeded,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),

@@ -2,6 +2,7 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from lonelypsp.auth.config import AuthResult
 from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
 from lonelypsp.stateful.messages.confirm_subscribe import (
     B2S_ConfirmSubscribeGlob,
@@ -35,19 +36,34 @@ async def process_subscribe_glob(state: StateOpen, message: S2B_SubscribeGlob) -
     url = make_for_receive_websocket_url_and_change_counter(state)
     auth_at = time.time()
     auth_result = await state.broadcaster_config.is_subscribe_glob_allowed(
+        tracing=message.tracing,
         url=url,
         recovery=None,
         glob=message.glob,
         now=auth_at,
         authorization=message.authorization,
     )
-    if auth_result != "ok":
+    if auth_result != AuthResult.OK:
         raise AuthRejectedException(f"subscribe exact: {auth_result}")
 
     if any(message.glob == glob for _, glob in state.my_receiver.glob_subscriptions):
         raise Exception("already subscribed to glob pattern")
 
     glob_regex = re.compile(translate(message.glob))
+
+    resp_tracing = b""  # TODO: tracing
+    # TODO: not safe to use a different url here I believe, because we would need to
+    # ensure nothing else gets queued to be sent between now and the send actually
+    # being queued, which would require being in a send_task, not a process_task
+    resp_authorization = (
+        await state.broadcaster_config.authorize_confirm_subscribe_glob(
+            tracing=resp_tracing,
+            url=url,
+            recovery=None,
+            glob=message.glob,
+            now=time.time(),
+        )
+    )
 
     # note we confirm before registering to ensure they don't receive notifications
     # on the topic before its been confirmed
@@ -57,6 +73,8 @@ async def process_subscribe_glob(state: StateOpen, message: S2B_SubscribeGlob) -
             B2S_ConfirmSubscribeGlob(
                 type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_SUBSCRIBE_GLOB,
                 glob=message.glob,
+                authorization=resp_authorization,
+                tracing=resp_tracing,
             ),
             minimal_headers=state.broadcaster_config.websocket_minimal_headers,
         ),

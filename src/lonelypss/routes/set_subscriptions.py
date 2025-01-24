@@ -18,12 +18,16 @@ from typing import (
 
 from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response
+from lonelypsp.auth.config import AuthResult
+from lonelypsp.compat import assert_never
+from lonelypsp.stateless.constants import BroadcasterToSubscriberStatelessMessageType
 from lonelypsp.stateless.make_strong_etag import (
     GlobAndRecovery,
     StrongEtag,
     TopicAndRecovery,
     create_strong_etag_generator,
 )
+from lonelypsp.sync_io import PreallocatedBytesIO
 
 from lonelypss.config.set_subscriptions_info import SetSubscriptionsInfo
 from lonelypss.middleware.config import get_config_from_request
@@ -386,6 +390,8 @@ async def check_subscriptions(
     documentation for stateless `SET_SUBSCRIPTION`
 
     ### request body
+    - 2 bytes (T): length of tracing data, big-endian, unsigned
+    - T bytes: the tracing data
     - 2 bytes (N): length of the subscriber url to set, big-endian, unsigned
     - N bytes: the url to set, utf-8 encoded
     - 1 byte (reserved for etag format): 0
@@ -400,7 +406,11 @@ async def check_subscriptions(
       - L bytes: the glob pattern, utf-8 encoded
 
     ### response body
-    empty
+    - 2 bytes (type): int(RESPONSE_GENERIC), big endian, unsigned
+    - 2 bytes (A): big-endian, unsigned, the length of the authorization
+    - A bytes: the authorization
+    - 2 bytes (T): big-endian, unsigned, the length of tracing data
+    - T bytes: the tracing data
     """
     config = get_config_from_request(request)
 
@@ -412,6 +422,10 @@ async def check_subscriptions(
 
             try:
                 body = AsyncIterableAIO(stream.__aiter__())
+
+                tracing_length_bytes = await async_read_exact(body, 2)
+                tracing_length = int.from_bytes(tracing_length_bytes, "big")
+                tracing = await async_read_exact(body, tracing_length)
 
                 url_length_bytes = await async_read_exact(body, 2)
                 url_length = int.from_bytes(url_length_bytes, "big")
@@ -434,6 +448,7 @@ async def check_subscriptions(
                     cp_stream
                 ) as subscription_info:
                     auth_result = await config.is_set_subscriptions_allowed(
+                        tracing=tracing,
                         url=url,
                         strong_etag=StrongEtag(format=0, etag=etag),
                         subscriptions=subscription_info,
@@ -441,14 +456,14 @@ async def check_subscriptions(
                         authorization=authorization,
                     )
 
-                if auth_result == "unauthorized":
+                if auth_result == AuthResult.UNAUTHORIZED:
                     return Response(status_code=401)
-                elif auth_result == "forbidden":
+                elif auth_result == AuthResult.FORBIDDEN:
                     return Response(status_code=403)
-                elif auth_result == "unavailable":
+                elif auth_result == AuthResult.UNAVAILABLE:
                     return Response(status_code=503)
-                elif auth_result != "ok":
-                    return Response(status_code=500)
+                elif auth_result != AuthResult.OK:
+                    assert_never(auth_result)
 
                 while True:
                     chunk = await cp_stream.read(io.DEFAULT_BUFFER_SIZE)
@@ -483,9 +498,35 @@ async def check_subscriptions(
 
             if set_result == "unavailable":
                 return Response(status_code=503)
+            if set_result != "success":
+                assert_never(set_result)
 
-            assert set_result == "success"
-            return Response(status_code=200)
+            resp_tracing = b""  # TODO: tracing
+            resp_authorization = await config.authorize_set_subscriptions_response(
+                tracing=resp_tracing, strong_etag=real_etag, now=time.time()
+            )
+            resp_authorization_bytes = (
+                b""
+                if resp_authorization is None
+                else resp_authorization.encode("utf-8")
+            )
+            resp_body = PreallocatedBytesIO(
+                2 + 2 + len(resp_authorization_bytes) + 2 + len(resp_tracing)
+            )
+            resp_body.write(
+                int(
+                    BroadcasterToSubscriberStatelessMessageType.RESPONSE_GENERIC
+                ).to_bytes(2, "big")
+            )
+            resp_body.write(len(resp_authorization_bytes).to_bytes(2, "big"))
+            resp_body.write(resp_authorization_bytes)
+            resp_body.write(len(resp_tracing).to_bytes(2, "big"))
+            resp_body.write(resp_tracing)
+            return Response(
+                status_code=200,
+                headers={"Content-Type": "application/octet-stream"},
+                content=resp_body.buffer,
+            )
 
     except ValueError:
         return Response(status_code=400)

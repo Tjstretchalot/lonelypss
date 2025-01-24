@@ -6,6 +6,7 @@ import tempfile
 import time
 from typing import IO, cast
 
+from lonelypsp.auth.config import AuthResult
 from lonelypsp.stateful.constants import BroadcasterToSubscriberStatefulMessageType
 from lonelypsp.stateful.messages.confirm_notify import (
     B2S_ConfirmNotify,
@@ -16,6 +17,9 @@ from lonelypsp.stateful.messages.continue_notify import (
     serialize_b2s_continue_notify,
 )
 from lonelypsp.stateful.messages.notify_stream import S2B_NotifyStream
+from lonelypsp.tracing.impl.noop.shared.handle_trusted_notify import (
+    NoopHandleTrustedNotify,
+)
 
 from lonelypss.routes.notify import TrustedNotifyResultType, handle_trusted_notify
 from lonelypss.ws.handlers.open.collector_utils import (
@@ -63,7 +67,9 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
 
     auth_at = time.time()
     auth_result = await state.broadcaster_config.is_notify_allowed(
+        tracing=first.tracing,
         topic=first.topic,
+        identifier=first.identifier,
         message_sha512=(
             first.unverified_compressed_sha512
             if first.compressor_id is not None
@@ -73,7 +79,7 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
         authorization=message.authorization,
     )
 
-    if auth_result != "ok":
+    if auth_result != AuthResult.OK:
         raise AuthRejectedException(f"notify stream: {auth_result}")
 
     state.notify_stream_state.body_hasher.update(message.payload)
@@ -91,6 +97,19 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
         raise Exception("notify stream: received too much data")
 
     if read_so_far < expected_length:
+        # TODO: cannot use a url here as we would need to ensure no other url is created
+        # until the send is actually queued, which requires being in a send_task, not the
+        # process_task
+
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = (
+            await state.broadcaster_config.authorize_stateful_continue_notify(
+                tracing=resp_tracing,
+                identifier=first.identifier,
+                part_id=received_part_id,
+                now=time.time(),
+            )
+        )
         send_simple_asap(
             state,
             serialize_b2s_continue_notify(
@@ -98,6 +117,8 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
                     type=BroadcasterToSubscriberStatefulMessageType.CONTINUE_NOTIFY,
                     identifier=message.identifier,
                     part_id=received_part_id,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),
@@ -126,10 +147,20 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
             session=state.client_session,
             content_length=0,
             sha512=actual_sha512,
+            tracer=NoopHandleTrustedNotify(),  # TODO: tracing
         )
         if notify_result.type != TrustedNotifyResultType.OK:
             raise Exception(f"notify stream failed: {notify_result}")
 
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = await state.broadcaster_config.authorize_confirm_notify(
+            tracing=resp_tracing,
+            identifier=first.identifier,
+            subscribers=notify_result.succeeded,
+            topic=first.topic,
+            message_sha512=actual_sha512,
+            now=time.time(),
+        )
         send_simple_asap(
             state,
             serialize_b2s_confirm_notify(
@@ -137,6 +168,8 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
                     type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
                     identifier=message.identifier,
                     subscribers=notify_result.succeeded,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),
@@ -175,11 +208,21 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
             session=state.client_session,
             content_length=first.uncompressed_length,
             sha512=actual_sha512,
+            tracer=NoopHandleTrustedNotify(),  # TODO: tracing
         )
 
         if notify_result.type != TrustedNotifyResultType.OK:
             raise Exception(f"notify stream failed: {notify_result}")
 
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = await state.broadcaster_config.authorize_confirm_notify(
+            tracing=resp_tracing,
+            identifier=first.identifier,
+            subscribers=notify_result.succeeded,
+            topic=first.topic,
+            message_sha512=actual_sha512,
+            now=time.time(),
+        )
         send_simple_asap(
             state,
             serialize_b2s_confirm_notify(
@@ -187,6 +230,8 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
                     type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
                     identifier=message.identifier,
                     subscribers=notify_result.succeeded,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),
@@ -249,10 +294,20 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
             session=state.client_session,
             content_length=first.decompressed_length,
             sha512=decompressed_sha512,
+            tracer=NoopHandleTrustedNotify(),  # TODO: tracing
         )
         if notify_result.type != TrustedNotifyResultType.OK:
             raise Exception(f"notify stream failed: {notify_result}")
 
+        resp_tracing = b""  # TODO: tracing
+        resp_authorization = await state.broadcaster_config.authorize_confirm_notify(
+            tracing=resp_tracing,
+            identifier=first.identifier,
+            subscribers=notify_result.succeeded,
+            topic=first.topic,
+            message_sha512=actual_sha512,
+            now=time.time(),
+        )
         send_simple_asap(
             state,
             serialize_b2s_confirm_notify(
@@ -260,6 +315,8 @@ async def process_notify_stream(state: StateOpen, message: S2B_NotifyStream) -> 
                     type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_NOTIFY,
                     identifier=message.identifier,
                     subscribers=notify_result.succeeded,
+                    authorization=resp_authorization,
+                    tracing=resp_tracing,
                 ),
                 minimal_headers=state.broadcaster_config.websocket_minimal_headers,
             ),

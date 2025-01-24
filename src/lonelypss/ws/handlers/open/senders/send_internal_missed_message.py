@@ -23,7 +23,9 @@ async def send_internal_missed_message(
     the subscriber is connected to Alice, and Bob received a message but
     could not tell Alice about it.
     """
+    tracing = b""  # TODO: tracing
     authorization = await state.broadcaster_config.authorize_missed(
+        tracing=tracing,
         recovery=make_for_send_websocket_url_and_change_counter(state),
         topic=message.topic,
         now=time.time(),
@@ -33,6 +35,7 @@ async def send_internal_missed_message(
             B2S_Missed(
                 type=BroadcasterToSubscriberStatefulMessageType.MISSED,
                 authorization=authorization,
+                tracing=tracing,
                 topic=message.topic,
             ),
             minimal_headers=state.broadcaster_config.websocket_minimal_headers,

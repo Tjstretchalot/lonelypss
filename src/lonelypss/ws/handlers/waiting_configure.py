@@ -8,6 +8,7 @@ import time
 from typing import TYPE_CHECKING, List, cast
 
 import aiohttp
+from lonelypsp.auth.config import AuthResult
 from lonelypsp.stateful.constants import (
     BroadcasterToSubscriberStatefulMessageType,
     SubscriberToBroadcasterStatefulMessageType,
@@ -101,16 +102,17 @@ async def handle_waiting_configure(state: State) -> State:
     auth_result = await state.broadcaster_config.is_stateful_configure_allowed(
         message=message, now=time.time()
     )
-    if auth_result != "ok":
+    if auth_result != AuthResult.OK:
         return StateClosing(type=StateType.CLOSING, websocket=state.websocket)
 
     receiver = SimpleReceiver()
     receiver_id = await state.internal_receiver.register_receiver(receiver)
     try:
         broadcaster_nonce = secrets.token_bytes(32)
+        tracing = b""  # TODO: tracing
         authorization = (
             await state.broadcaster_config.authorize_stateful_confirm_configure(
-                broadcaster_nonce=broadcaster_nonce, now=time.time()
+                broadcaster_nonce=broadcaster_nonce, tracing=tracing, now=time.time()
             )
         )
         connection_nonce = hashlib.sha256(
@@ -187,6 +189,7 @@ async def handle_waiting_configure(state: State) -> State:
                             type=BroadcasterToSubscriberStatefulMessageType.CONFIRM_CONFIGURE,
                             broadcaster_nonce=broadcaster_nonce,
                             authorization=authorization,
+                            tracing=tracing,
                         ),
                         minimal_headers=state.broadcaster_config.websocket_minimal_headers,
                     )
