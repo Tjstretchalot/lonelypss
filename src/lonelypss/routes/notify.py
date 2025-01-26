@@ -225,6 +225,7 @@ async def notify(
                 + len(resp_authorization_bytes)
                 + 2
                 + len(resp_tracing)
+                + 4
                 + 1
                 + len(identifier)
             )
@@ -237,6 +238,7 @@ async def notify(
             resp.write(resp_authorization_bytes)
             resp.write(len(resp_tracing).to_bytes(2, "big"))
             resp.write(resp_tracing)
+            resp.write(notify_result.succeeded.to_bytes(4, "big"))
             resp.write(len(identifier).to_bytes(1, "big"))
             resp.write(identifier)
 
