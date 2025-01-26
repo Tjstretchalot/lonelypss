@@ -444,7 +444,7 @@ async def handle_trusted_notify(
 
         try:
             try:
-                parsed_resp = await _parse_notify_response(resp.content)
+                parsed_resp = await _parse_receive_response(resp.content)
             finally:
                 await raw_resp.__aexit__(None, None, None)
         except Exception:
@@ -559,7 +559,7 @@ class _ReceiveResponseConfirmReceive:
     num_subscribers: int
 
 
-async def _parse_notify_response(
+async def _parse_receive_response(
     rdr: AsyncReadableBytesIO,
 ) -> Union[_ReceiveResponseUnsubscribeImmediate, _ReceiveResponseConfirmReceive]:
     """Raises ValueError typically if the body is bad"""

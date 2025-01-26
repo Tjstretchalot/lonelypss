@@ -40,35 +40,6 @@ async def check_read_task(state: StateOpen) -> CheckResult:
     message = S2B_AnyMessageParser.parse(prefix.flags, prefix.type, payload_reader)
     state.read_task = make_websocket_read_task(state.websocket)
 
-    # fast track acks as they are common and can be handled synchronously
-    if message.type == SubscriberToBroadcasterStatefulMessageType.CONFIRM_RECEIVE:
-        expected_ack = state.expecting_acks.get_nowait()
-        if expected_ack.type != message.type:
-            raise Exception(
-                f"unexpected confirm receive (expecting a {expected_ack.type})"
-            )
-        if expected_ack.identifier != message.identifier:
-            raise Exception(
-                f"unexpected confirm receive (expecting identifier {expected_ack.identifier!r}, got {message.identifier!r})"
-            )
-        return CheckResult.RESTART
-
-    if message.type == SubscriberToBroadcasterStatefulMessageType.CONTINUE_RECEIVE:
-        expected_ack = state.expecting_acks.get_nowait()
-        if expected_ack.type != message.type:
-            raise Exception(
-                f"unexpected continue receive (expecting a {expected_ack.type})"
-            )
-        if expected_ack.identifier != message.identifier:
-            raise Exception(
-                f"unexpected continue receive (expecting identifier {expected_ack.identifier!r}, got {message.identifier!r})"
-            )
-        if expected_ack.part_id != message.part_id:
-            raise Exception(
-                f"unexpected continue receive (expecting part_id {expected_ack.part_id}, got {message.part_id})"
-            )
-        return CheckResult.RESTART
-
     if state.process_task is None:
         state.process_task = asyncio.create_task(process_any(state, message))
     else:

@@ -330,6 +330,7 @@ async def send_receive_stream_given_first_headers(
                     identifier=identifier,
                     authorization=None,
                     tracing=b"",
+                    num_subscribers=1,
                 )
                 if is_done
                 else S2B_ContinueReceive(
