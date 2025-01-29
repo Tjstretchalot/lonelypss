@@ -32,8 +32,12 @@ from lonelypss.config.config import (
 )
 from lonelypss.middleware.config import get_config_from_request
 from lonelypss.util.async_io import AsyncReadableBytesIO, async_read_exact
-from lonelypss.util.close_guarded_io import CloseGuardedIO
-from lonelypss.util.sync_io import SyncIOBaseLikeIO, read_exact
+from lonelypss.util.sync_io import (
+    PositionedSyncStandardIO,
+    PrefixedSyncStandardIO,
+    SyncIOBaseLikeIO,
+    read_exact,
+)
 
 router = APIRouter()
 
@@ -190,7 +194,7 @@ async def notify(
             )
             del on_auth_verified_trace
 
-            request_body.seek(2 + topic_length + 64 + 8)
+            request_body.seek(header_length)
             notify_result = await handle_trusted_notify(
                 topic,
                 request_body,
@@ -365,13 +369,10 @@ async def handle_trusted_notify(
     failed = 0
     headers: Dict[str, str] = {
         "Content-Type": "application/octet-stream",
-        "Content-Length": str(content_length),
         "Repr-Digest": f"sha-512={base64.b64encode(sha512).decode('ascii')}",
-        "X-Topic": base64.b64encode(topic).decode("ascii"),
     }
 
     message_starts_at = data.tell()
-    guarded_request_body = CloseGuardedIO(data)
 
     async for subscriber in config.get_subscribers(topic=topic):
         if subscriber.type == SubscriberInfoType.UNAVAILABLE:
@@ -416,7 +417,27 @@ async def handle_trusted_notify(
         else:
             headers["Authorization"] = my_authorization
 
-        data.seek(message_starts_at)
+        message_prefix = PreallocatedBytesIO(
+            2 + len(my_tracing) + 2 + len(topic) + 1 + len(my_identifier) + 8
+        )
+        message_prefix.write(len(my_tracing).to_bytes(2, "big"))
+        message_prefix.write(my_tracing)
+        message_prefix.write(len(topic).to_bytes(2, "big"))
+        message_prefix.write(topic)
+        message_prefix.write(len(my_identifier).to_bytes(1, "big"))
+        message_prefix.write(my_identifier)
+        message_prefix.write(content_length.to_bytes(8, "big"))
+        guarded_request_body = PrefixedSyncStandardIO(
+            prefix=PositionedSyncStandardIO(
+                stream=message_prefix, start_idx=0, end_idx=len(message_prefix.buffer)
+            ),
+            child=PositionedSyncStandardIO(
+                stream=data,
+                start_idx=message_starts_at,
+                end_idx=message_starts_at + content_length,
+            ),
+        )
+        headers["Content-Length"] = str(len(guarded_request_body))
         try:
             raw_resp = session.post(
                 subscriber.url,
@@ -530,7 +551,7 @@ async def handle_trusted_notify(
         del on_auth_result_tracer
 
         failed -= 1
-        succeeded += 1
+        succeeded += parsed_resp.num_subscribers
 
     final_tracer = tracer.on_no_more_subscribers()
     del tracer
