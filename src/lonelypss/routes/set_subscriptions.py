@@ -525,7 +525,7 @@ async def check_subscriptions(
             return Response(
                 status_code=200,
                 headers={"Content-Type": "application/octet-stream"},
-                content=resp_body.buffer,
+                content=memoryview(resp_body.buffer),
             )
 
     except ValueError:

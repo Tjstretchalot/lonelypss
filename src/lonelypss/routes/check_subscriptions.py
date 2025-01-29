@@ -122,7 +122,7 @@ async def check_subscriptions(
     result.write(etag.format.to_bytes(1, "big"))
     result.write(etag.etag)
     return Response(
-        content=result.buffer,
+        content=memoryview(result.buffer),
         headers={"Content-Type": "application/octet-stream"},
         status_code=200,
     )

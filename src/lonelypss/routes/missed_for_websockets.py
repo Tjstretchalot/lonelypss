@@ -96,7 +96,7 @@ async def missed_for_websockets(
     resp_body.write(len(resp_tracing).to_bytes(2, "big"))
     resp_body.write(resp_tracing)
     return Response(
-        content=resp_body.buffer,
+        content=memoryview(resp_body.buffer),
         status_code=200,
         headers={"Content-Type": "application/octet-stream"},
     )

@@ -244,7 +244,7 @@ async def notify(
 
             return Response(
                 status_code=200,
-                content=resp.buffer,
+                content=memoryview(resp.buffer),
                 headers={
                     "Content-Type": "application/octet-stream",
                 },

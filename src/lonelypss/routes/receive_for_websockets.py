@@ -41,8 +41,10 @@ async def receive_for_websockets(
     if repr_digest is None:
         return Response(
             status_code=400,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            content=b'{"unsubscribe": true, "reason": "missing repr-digest header"}',
+            headers={"Content-Type": "application/octet-stream"},
+            content=int(
+                SubscriberToBroadcasterStatelessMessageType.RESPONSE_UNSUBSCRIBE_IMMEDIATE
+            ).to_bytes(2, "big"),
         )
 
     expected_digest_b64: Optional[str] = None
@@ -59,8 +61,10 @@ async def receive_for_websockets(
     if expected_digest_b64 is None:
         return Response(
             status_code=400,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            content=b'{"unsubscribe": true, "reason": "missing sha-512 repr-digest"}',
+            headers={"Content-Type": "application/octet-stream"},
+            content=int(
+                SubscriberToBroadcasterStatelessMessageType.RESPONSE_UNSUBSCRIBE_IMMEDIATE
+            ).to_bytes(2, "big"),
         )
 
     try:
@@ -68,16 +72,20 @@ async def receive_for_websockets(
     except BaseException:
         return Response(
             status_code=400,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            content=b'{"unsubscribe": true, "reason": "unparseable sha-512 repr-digest (not base64)"}',
+            headers={"Content-Type": "application/octet-stream"},
+            content=int(
+                SubscriberToBroadcasterStatelessMessageType.RESPONSE_UNSUBSCRIBE_IMMEDIATE
+            ).to_bytes(2, "big"),
         )
 
     request_url = str(request.url)
     if request_url != receiver.receiver_url:
         return Response(
             status_code=400,
-            headers={"Content-Type": "application/json; charset=utf-8"},
-            content=b'{"unsubscribe": true, "reason": "invalid receiver URL"}',
+            headers={"Content-Type": "application/octet-stream"},
+            content=int(
+                SubscriberToBroadcasterStatelessMessageType.RESPONSE_UNSUBSCRIBE_IMMEDIATE
+            ).to_bytes(2, "big"),
         )
 
     stream = request.stream()
@@ -215,7 +223,7 @@ async def receive_for_websockets(
         return Response(
             status_code=200,
             headers={"Content-Type": "application/octet-stream"},
-            content=resp_body.buffer,
+            content=memoryview(resp_body.buffer),
         )
     finally:
         await stream.aclose()
