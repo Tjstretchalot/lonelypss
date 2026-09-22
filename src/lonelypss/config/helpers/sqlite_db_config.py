@@ -872,6 +872,8 @@ class _ExistingTopicsIter:
         self.batch_remaining.ensure_space_for(len(raw_batch))
         for row in raw_batch:
             self.batch_remaining.append(row[0])
+        if raw_batch:
+            self.last_topic = raw_batch[-1][0]
         self.at_last_batch = len(raw_batch) < self.batch_size
 
 
@@ -911,6 +913,8 @@ class _ExistingGlobsIter:
         self.batch_remaining.ensure_space_for(len(raw_batch))
         for row in raw_batch:
             self.batch_remaining.append(row[0])
+        if raw_batch:
+            self.last_glob = raw_batch[-1][0]
         self.at_last_batch = len(raw_batch) < self.batch_size
 
 
